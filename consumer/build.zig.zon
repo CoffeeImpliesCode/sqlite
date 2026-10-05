@@ -1,0 +1,28 @@
+.{
+    .name = .sqlite3_consumer,
+    // The consumer's own version, and it is deliberately not the library's. A
+    // dependent package is a different package: it has its own identity, its
+    // own release cycle and its own compatibility promise, and borrowing the
+    // library's number would make two unrelated things move together.
+    .version = "0.1.0",
+    // `.fingerprint` is the value the Zig toolchain printed for this package,
+    // `0xb7655c6ba16d5c86`, taken from its own diagnostic
+    // ("missing top-level 'fingerprint' field; suggested value: ...") rather
+    // than written by hand. The field is what distinguishes this package from
+    // another one claiming the same name, so a value nobody derived would be a
+    // security property dressed as a comment.
+    .fingerprint = 0xb7655c6ba16d5c86,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        // A relative path, not a registry or archive URL. The consumer is the
+        // proof that `dep.module("sqlite3")` works from outside the package that
+        // defines it; resolving that through the network would make the proof
+        // depend on a published state of the world instead.
+        .sqlite3 = .{ .path = ".." },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
