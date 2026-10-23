@@ -1,43 +1,13 @@
 // SPDX-License-Identifier: LicenseRef-PublicDomain
 // See FORK-LICENSE.md for what that identifier covers.
 
-//! The deterministic example program.
-//!
-//! `zig build smoke` runs this, and `zig build` compiles it. It is an example,
-//! not a test: `tests.zig` holds the behavioural proofs and this file holds none,
-//! so nothing here pins a value to prove that a function exists. What it does
-//! hold is a working end-to-end path through the published surface — open, bind,
-//! step, read, close — over the same twelve-row ledger the tests use, so a
-//! reader can see the API used the way a consumer uses it.
-//!
-//! Three things are printed rather than asserted, and the difference is
-//! deliberate:
-//!
-//!   * the version the *provider* reports, read through the facade at run time.
-//!     Under `-Druntime=true` that string comes out of a shared object named on
-//!     the command line, so printing it is how a caller sees which SQLite it got;
-//!   * `sqlite3_compileoption_used` for a handful of `SQLITE_ENABLE_*` options.
-//!     This build defines none of them, so each answer is expected to be zero,
-//!     and saying so out loud is more honest than leaving a reader to guess what
-//!     "no compile options are defined" means in practice;
-//!   * the thread-safety level the library reports for itself.
-//!
-//! The one value the program checks is arithmetic it did not obtain from SQLite:
-//! the ledger is seeded with literal amounts and the grouped sum is compared
-//! with the sum written out in the source. A facade that dropped a row or
-//! retyped an integer fails here, and it fails on a number computed on paper.
+//! End-to-end example of the SQLite facade: seed a ledger, report provider details, and query it.
+//! It checks the grouped total against hand-computed values.
 
 const std = @import("std");
 const sqlite = @import("sqlite3");
 
-/// The twelve rows, and the grouped answer, hand-written.
-///
-/// `a` is 100 + 50 + 300 + 25 - 50 = 425 over five rows; `b` is
-/// 250 + 25 - 100 + 400 = 575 over four; `c` is -700 + 75 + 50 = -575 over
-/// three. The whole table is 425 over twelve rows. These are the same twelve
-/// rows and the same three numbers `tools/fixture/aggregate.sql` seeds and
-/// `tools/fixture/expected.tsv` records, so the shell gate and this program
-/// answer one question.
+/// Twelve fixture rows; expected sums are a=425 (5 rows), b=575 (4), and c=-575 (3).
 const ledger = [_]struct { entry: i64, account: []const u8, cents: i64 }{
     .{ .entry = 1, .account = "a", .cents = 100 },
     .{ .entry = 2, .account = "b", .cents = 250 },
@@ -57,11 +27,7 @@ const ledger = [_]struct { entry: i64, account: []const u8, cents: i64 }{
 const expected_total: i64 = 425;
 const expected_rows: i64 = 12;
 
-/// Open a private in-memory database, or say why it did not open.
-///
-/// `:memory:` is upstream's own special name for a temporary in-memory database
-/// that vanishes when the connection closes (`src/sqlite3.h:3833-3835`), so this
-/// program writes no file and needs no temporary directory.
+/// Opens a private in-memory database and reports open failures.
 fn openMemory() !sqlite.Db {
     const opened = try sqlite.Db.open(":memory:", .{ .readwrite = true, .create = true });
     return switch (opened) {
@@ -87,19 +53,13 @@ pub fn main(init: std.process.Init) !void {
     var stdout = std.Io.File.stdout().writerStreaming(io, &out_buffer);
     const w = &stdout.interface;
 
-    // Printed, never compared: a version string is provenance, not behaviour,
-    // and the library's own answer to `sqlite3_libversion` is the authority.
     try w.print("sqlite3 smoke\n", .{});
     try w.print("  provider:       {s}\n", .{sqlite.libraryVersion()});
     try w.print("  version number: {d}\n", .{sqlite.libraryVersionNumber()});
     try w.print("  source id:      {s}\n", .{sqlite.sourceId()});
     try w.print("  thread safe:    {d}\n", .{sqlite.threadSafe()});
 
-    // No compile option is defined on any compile line in this build, so each of
-    // these asks SQLite itself whether it was configured in. The answers are
-    // printed, not asserted: a build that later defines one would change them,
-    // and an example that failed on the change would be testing a build policy
-    // rather than the API.
+    // Display compile options instead of pinning build features in this example.
     try w.print("  compiled in:\n", .{});
     for ([_][:0]const u8{
         "SQLITE_ENABLE_FTS5",
@@ -114,9 +74,6 @@ pub fn main(init: std.process.Init) !void {
         });
     }
 
-    // The ledger, through the same binding path a consumer would use: one
-    // prepared statement, bound three times, stepped to completion, reused for
-    // the next row after a reset.
     var db = try openMemory();
     defer db.close();
 
@@ -136,9 +93,6 @@ pub fn main(init: std.process.Init) !void {
         try insert.runToCompletion();
     }
 
-    // The grouped reduction, read back one row at a time. `column_count` is
-    // printed rather than checked: it is what the example is demonstrating, and
-    // `tests.zig` is where a wrong column count would be a failure.
     var grouped = try db.prepare(
         \\SELECT account, SUM(cents), COUNT(*), MIN(entry), MAX(entry)
         \\  FROM ledger
@@ -177,10 +131,7 @@ pub fn main(init: std.process.Init) !void {
         return error.SmokeCheckFailed;
     }
 
-    // The one checked value, against arithmetic written out above rather than
-    // obtained from SQLite. Three group sums have to add up to the whole-table
-    // sum, which is what catches a row that was counted in one group and missed
-    // in another.
+    // Compare grouped totals with the hand-computed whole-table answer.
     var whole = try db.prepare(
         \\SELECT SUM(cents), COUNT(*) FROM ledger
     );
@@ -199,8 +150,7 @@ pub fn main(init: std.process.Init) !void {
         return error.SmokeCheckFailed;
     }
 
-    // An error the library diagnoses is shown as its own code, because "it
-    // failed" is not something a reader can act on.
+    // Print SQLite's result code with the error for an actionable diagnosis.
     if (db.exec("SELECT * FROM a_table_that_does_not_exist")) |_| {
         std.debug.print("sqlite3-smoke: a query against a missing table succeeded\n", .{});
         return error.SmokeCheckFailed;

@@ -1,60 +1,15 @@
 // SPDX-License-Identifier: LicenseRef-PublicDomain
 // See ../FORK-LICENSE.md for what that identifier covers.
 
-//! Consumes the `sqlite3` package the way an outside project would.
-//!
-//! Everything here goes through the published surface only: `dep.module` in
-//! `build.zig`, and `@import("sqlite3")` here. No path reaches into the
-//! library's own tree, so if this builds and produces the answers below, the
-//! module contract is real: the typed facade, the translated headers it
-//! re-exports as `c`, and the native library behind both arrived through one
-//! dependency line.
-//!
-//! ## What the answers are
-//!
-//! The one check is a **hand-computed aggregation**, and the arithmetic is done
-//! on paper rather than obtained from SQLite. The table below is seeded with
-//! twelve literal rows, the same twelve `tools/fixture/aggregate.sql` seeds,
-//! and the answer is spelled out in the source:
-//!
-//! ```text
-//!   a: 100 + 50 + 300 + 25 - 50 =  425   5 rows   entries 1, 3, 6, 9, 12
-//!   b: 250 + 25 - 100 + 400     =  575   4 rows   entries 2, 5, 8, 11
-//!   c: -700 + 75 + 50           = -575   3 rows   entries 4, 7, 10
-//!
-//!   whole table                   425  over 12 rows
-//! ```
-//!
-//! A facade that dropped a row, decoded an integer as a narrower type,
-//! reordered a column or answered `done` one step early disagrees with that
-//! arithmetic, and the program exits non-zero. It is not the same code run
-//! twice: the numbers below were computed from the rows, not read back out of
-//! the library and compared with itself.
-//!
-//! The other two printed lines are printed rather than compared. The provider's
-//! own version string and source id are provenance, and under `-Druntime=true`
-//! they come out of a shared object named on the command line — showing the
-//! caller which SQLite it got is the point of printing them.
-//!
-//! ## The same source builds against a linked package and a runtime-loaded one
-//!
-//! `sqlite.runtime_loaded` is a comptime constant, so the difference is one
-//! branch and no duplicated program: in the runtime-loaded build the provider is
-//! named on the command line (`--provider <path>`) or in `SQLITE_TEST_PROVIDER`,
-//! loaded once, and the same answers follow.
+//! Exercises the public `sqlite3` package in linked and runtime-loaded builds.
+//! Expected aggregates are hand-computed; provider version and source ID are reported, not treated as behavior.
 
 const std = @import("std");
 const sqlite = @import("sqlite3");
 
-/// A runtime-loading build has no provider until one is named.
 const ConfigurationError = error{NoProviderConfigured};
 
-/// The twelve seeded rows, as Zig values, and the grouped answer by hand.
-///
-/// Written out rather than generated: a fixture whose expected value came from
-/// the same code that produced the observed value would prove nothing. The sums
-/// are spelled out in the module comment above and repeated as literals below so
-/// that a reader can check them against the rows without running anything.
+/// Twelve literal rows for the independent consumer check.
 const rows = [_]struct { entry: i64, account: []const u8, cents: i64 }{
     .{ .entry = 1, .account = "a", .cents = 100 },
     .{ .entry = 2, .account = "b", .cents = 250 },
@@ -70,7 +25,6 @@ const rows = [_]struct { entry: i64, account: []const u8, cents: i64 }{
     .{ .entry = 12, .account = "a", .cents = -50 },
 };
 
-/// One account's hand-computed answer.
 const Bucket = struct {
     name: []const u8,
     sum: i64,
@@ -79,24 +33,14 @@ const Bucket = struct {
     last: i64,
 };
 
-/// The answer, computed from the rows above on paper.
-///
-/// `a`: 100 + 50 + 300 + 25 - 50 = 425, five rows, entries 1 through 12.
-/// `b`: 250 + 25 - 100 + 400 = 575, four rows, entries 2 through 11.
-/// `c`: -700 + 75 + 50 = -575, three rows, entries 4 through 10.
-/// Whole table: 425 + 575 - 575 = 425 over twelve rows.
+/// Hand-computed aggregate expected from `rows`.
 const expected = [_]Bucket{
     .{ .name = "a", .sum = 425, .count = 5, .first = 1, .last = 12 },
     .{ .name = "b", .sum = 575, .count = 4, .first = 2, .last = 11 },
     .{ .name = "c", .sum = -575, .count = 3, .first = 4, .last = 10 },
 };
 
-/// The provider this run should load, from `--provider <path>` or from
-/// `SQLITE_TEST_PROVIDER`.
-///
-/// Both are explicit. Nothing here looks in a default location, and a build
-/// that was not told which file to load says so rather than loading something
-/// else.
+/// Reads `--provider` or `SQLITE_TEST_PROVIDER`; missing configuration is an error.
 fn providerRequest(init: std.process.Init) ConfigurationError![]const u8 {
     const args = init.minimal.args.toSlice(init.arena.allocator()) catch
         return noProvider();
@@ -111,8 +55,7 @@ fn providerRequest(init: std.process.Init) ConfigurationError![]const u8 {
         return noProvider();
 }
 
-/// Say which variable is missing. An error name on its own would send the next
-/// person into the loader instead of to the command line.
+/// Reports that a runtime-loaded build needs an explicit provider.
 fn noProvider() ConfigurationError {
     std.debug.print(
         "consumer: this is a runtime-loading build. Pass --provider <path>, or " ++
@@ -124,7 +67,6 @@ fn noProvider() ConfigurationError {
     return error.NoProviderConfigured;
 }
 
-/// Open a private in-memory database, or say why it did not open.
 fn openMemory() !sqlite.Db {
     const opened = try sqlite.Db.open(":memory:", .{ .readwrite = true, .create = true });
     return switch (opened) {
@@ -150,16 +92,12 @@ pub fn main(init: std.process.Init) !void {
     var stdout = std.Io.File.stdout().writerStreaming(io, &buffer);
     const w = &stdout.interface;
 
-    // In a runtime-loading build every call below goes through a table that this
-    // one call fills. In a linked build the branch is not analyzed at all.
+    // Load the provider before any runtime-dispatched call.
     if (comptime sqlite.runtime_loaded) {
         try sqlite.load(.{ .path = try providerRequest(init) });
     }
 
     try w.print("sqlite3 consumer\n", .{});
-    // Through the library's own accessors, so these lines name the provider this
-    // build reached rather than constants compiled into this program. They are
-    // printed, not compared: a version string is provenance, not behaviour.
     try w.print("{s: <34}{s}\n", .{
         if (sqlite.runtime_loaded) "loaded" else "linked",
         sqlite.libraryVersion(),
@@ -173,9 +111,7 @@ pub fn main(init: std.process.Init) !void {
         \\CREATE TABLE ledger(entry INTEGER NOT NULL, account TEXT NOT NULL, cents INTEGER NOT NULL)
     );
 
-    // One prepared statement, bound three times, reused for every row. A
-    // dependent that prepared per row would work too; this shape is what the
-    // facade's reset/finalize ownership is written for.
+    // Reuse one statement to exercise the facade's reset/finalize ownership.
     var insert = try db.prepare(
         \\INSERT INTO ledger VALUES(?1, ?2, ?3)
     );
@@ -225,9 +161,7 @@ pub fn main(init: std.process.Init) !void {
     }
     try checkInt("account groups read", @as(i64, @intCast(seen)), @as(i64, 3));
 
-    // The whole-table reduction, which is what catches a GROUP BY that lost or
-    // duplicated a row rather than one that mis-typed a column: the three group
-    // sums have to add up to it, and the three group counts to its count.
+    // Compare whole-table totals with group totals to detect omitted or duplicated rows.
     var whole = try db.prepare(
         \\SELECT SUM(cents), COUNT(*) FROM ledger
     );
@@ -240,8 +174,6 @@ pub fn main(init: std.process.Init) !void {
     try checkInt("whole-table rows", whole_rows, 12);
     try checkInt("group sums add up to it", total, whole_sum);
 
-    // A failure the library diagnoses is a code a caller can act on, not a
-    // message to guess from.
     if (db.exec("SELECT * FROM a_table_that_does_not_exist")) |_| {
         std.debug.print("consumer: a query against a missing table succeeded\n", .{});
         return error.ConsumerCheckFailed;
@@ -257,8 +189,6 @@ pub fn main(init: std.process.Init) !void {
     try w.flush();
 }
 
-/// A checked integer. The expected value is the one written out in the module
-/// comment, not a value this program obtained from the library.
 fn checkInt(what: []const u8, got: i64, want: i64) !void {
     if (got != want) {
         std.debug.print("consumer: {s}: expected {d}, computed {d}\n", .{
@@ -270,7 +200,6 @@ fn checkInt(what: []const u8, got: i64, want: i64) !void {
     }
 }
 
-/// A checked string, with the same rule: the expected value is a literal.
 fn checkString(what: []const u8, got: []const u8, want: []const u8) !void {
     if (!std.mem.eql(u8, got, want)) {
         std.debug.print("consumer: {s}: expected \"{s}\", computed \"{s}\"\n", .{
