@@ -1,7 +1,7 @@
 # sqlite3
 
 SQLite 3.53.4, packaged as a Zig SDK with the native library, command-line shell, C headers, and typed Zig facade.
-Based on Fossil check-in `bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc`; requires Zig 0.16.0.
+Based on Fossil check-in `bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc`; requires Zig 0.17.0.
 
 ## Source deviations from upstream
 
@@ -29,7 +29,7 @@ The default `zig build check` graph compiles these targets; this table describes
 | `x86_64-windows-gnu` | None | Uses Windows loader and C runtime |
 | `wasm32-wasi` | None | Static only; upstream selects single-thread mode and omits extension loading |
 
-The generic Unix rule also requests `-ldl` on NetBSD and OpenBSD; the recorded Zig 0.16.0 cross-target run could not find that library. Whether those targets need separate `-lm` or `-lpthread` is unknown. Runtime loading is unavailable on WASI, Emscripten, and freestanding targets. Shared delivery needs a dynamic linker; applying `-Dlinkage=dynamic` to the current six-target graph fails when it reaches WASI.
+The generic Unix rule also requests `-ldl` on NetBSD and OpenBSD; whether that library is available and whether those targets need separate `-lm` or `-lpthread` are unknown. Runtime loading is unavailable on WASI, Emscripten, and freestanding targets. Shared delivery needs a dynamic linker; applying `-Dlinkage=dynamic` to the current six-target graph fails when it reaches WASI.
 
 ## Consumption
 

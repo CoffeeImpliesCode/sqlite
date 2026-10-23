@@ -40,5 +40,7 @@ The native files under `src/` are upstream's amalgamation, headers, and shell; t
 - WASI is static-only: upstream selects `SQLITE_THREADSAFE=0` and omits loadable extensions. Runtime loading is unavailable there; requesting dynamic linkage for the full matrix reaches WASI, which has no dynamic linker, and fails configuration.
 - Runtime loading is also unavailable on Emscripten and freestanding targets. The routed `SQLITE_TRANSIENT` sentinel requires function-pointer alignment of one; linked mode does not have this constraint.
 - Windows uses the Windows loader and C runtime, so the build names no separate Unix link libraries. macOS needs `-lm`; `dlopen` and pthread are in libc.
-- The generic Unix link rule requests `-ldl` on NetBSD and OpenBSD, where Zig 0.16 cannot find that library. Whether those targets also need separate `-lm` or `-lpthread` is not established.
+- The generic Unix link rule requests `-ldl` on NetBSD and OpenBSD; availability of that library and need for separate `-lm` or `-lpthread` are not established.
 - A runtime provider must export every declaration in the translated header; a system SQLite missing any required symbol is rejected by the loader.
+- Zig 0.17 exposes no configure-time runner flags or install-prefix string, so cross-target consumer builds install under the parent prefix.
+- Zig 0.17 consumer builds use `--cache-dir <path>` and inherit `ZIG_GLOBAL_CACHE_DIR` and `ZIG_LIB_DIR` from the parent working directory.

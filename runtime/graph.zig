@@ -22,7 +22,7 @@ const provider_excluded = "";
 pub fn createCoreModule(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) *std.Build.Module {
     return b.createModule(.{
         .root_source_file = b.path("runtime/loader.zig"),
@@ -39,7 +39,7 @@ pub fn createModule(
     b: *std.Build,
     translate: *std.Build.Step.TranslateC,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) *std.Build.Module {
     const core = createCoreModule(b, target, optimize);
 
@@ -62,7 +62,7 @@ fn createDispatchModule(
     b: *std.Build,
     translate: *std.Build.Step.TranslateC,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     core: *std.Build.Module,
     library: *std.Build.Module,
 ) *std.Build.Module {
@@ -106,7 +106,7 @@ fn generateDispatch(
         .root_module = b.createModule(.{
             .root_source_file = b.path("runtime/generate.zig"),
             .target = b.graph.host,
-            .optimize = .Debug,
+            .optimize = .debug,
         }),
     });
 
@@ -114,7 +114,7 @@ fn generateDispatch(
     run.addArg("--library");
     run.addArg("sqlite");
     run.addArg("--translate");
-    run.addFileArg(translate.getOutput());
+    run.addFileArg2(translate.getOutput(), .{});
     if (libc_noise.len != 0) {
         run.addArg("--noise");
         run.addArg(libc_noise);
@@ -128,8 +128,8 @@ fn generateDispatch(
         run.addArg(provider_excluded);
     }
     run.addArg("--native-output");
-    const native_source = run.addOutputFileArg("native.zig");
+    const native_source = run.addOutputFileArg2("native.zig", .{});
     run.addArg("--output");
-    const dispatch_source = run.addOutputFileArg("dispatch.zig");
+    const dispatch_source = run.addOutputFileArg2("dispatch.zig", .{});
     return .{ .native = native_source, .dispatch = dispatch_source };
 }

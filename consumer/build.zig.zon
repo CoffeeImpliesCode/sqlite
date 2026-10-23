@@ -12,7 +12,7 @@
     // another one claiming the same name, so a value nobody derived would be a
     // security property dressed as a comment.
     .fingerprint = 0xb7655c6ba16d5c86,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         // A relative path, not a registry or archive URL. The consumer is the
         // proof that `dep.module("sqlite3")` works from outside the package that

@@ -6,7 +6,7 @@
     .fingerprint = 0x6edcd71155f49d5f,
     // Upstream SQLite release, checked against the header by build.zig.
     .version = "3.53.4",
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     // No external package dependencies.
     .dependencies = .{},
     .paths = .{

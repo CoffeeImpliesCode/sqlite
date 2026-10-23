@@ -197,9 +197,9 @@ fn artifactName(
 fn addGraph(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     library: Library,
-    linkage: std.builtin.LinkMode,
+    linkage: std.lang.LinkMode,
     runtime_loaded: bool,
     public: bool,
 ) Graph {
@@ -275,8 +275,8 @@ fn addGraph(
 fn add_c_library(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-    requested: std.builtin.LinkMode,
+    optimize: std.lang.Optimize,
+    requested: std.lang.LinkMode,
     platform: Platform,
     name: []const u8,
 ) *std.Build.Step.Compile {
@@ -330,8 +330,8 @@ fn add_c_library(
 fn add_program(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-    linkage: std.builtin.LinkMode,
+    optimize: std.lang.Optimize,
+    linkage: std.lang.LinkMode,
     platform: Platform,
     c_lib: *std.Build.Step.Compile,
     program: Program,
@@ -383,9 +383,9 @@ fn add_target_check(
     b: *std.Build,
     step: *std.Build.Step,
     query: std.Target.Query,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     library: Library,
-    linkage: std.builtin.LinkMode,
+    linkage: std.lang.LinkMode,
     runtime_loaded: bool,
 ) void {
     const cross_target = b.resolveTargetQuery(query);
@@ -434,14 +434,14 @@ fn add_target_check(
 }
 
 /// Runs the separate consumer against this build's resolved configuration.
-/// The nested build inherits target, CPU, optimization, linkage and cache settings.
-/// Run only when the selected target has an available executor.
+/// The nested build inherits this graph's target, CPU, optimization and linkage.
+/// Cross targets install; Zig 0.17 exposes no runner flags during configuration.
 fn runConsumer(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     library: Library,
-    linkage: std.builtin.LinkMode,
+    linkage: std.lang.LinkMode,
     runtime_loaded: bool,
 ) *std.Build.Step.Run {
     const triple = target.query.zigTriple(b.allocator) catch @panic("OOM");
@@ -454,7 +454,9 @@ fn runConsumer(
     // Reuse the compiler running this build script, not PATH.
     const run = b.addSystemCommand(&.{ b.graph.zig_exe, "build" });
     run.setName("consumer package");
-    run.setCwd(b.path("consumer"));
+    // Keep relative environment paths anchored at the parent's working directory.
+    run.addArg("--build-file");
+    run.addFileArg2(b.path("consumer/build.zig"), .{ .make_absolute = true });
     run.addArg(if (hostCanExecute(b, target)) "run" else "install");
     run.addArg(b.fmt("-Dtarget={s}", .{triple}));
     // Forward CPU features so the consumer matches the library's target.
@@ -467,73 +469,53 @@ fn runConsumer(
     // Forward the resolved system-integration flag; it is not a `-D` option.
     // This keeps the nested dependency in the same mode as this graph.
     run.addArg(if (library == .system) b.fmt("-fsys={s}", .{lib_name}) else b.fmt("-fno-sys={s}", .{lib_name}));
-    // Forward available runners and dynamic-linker support.
-    if (b.enable_darling) run.addArg("-fdarling");
-    if (b.enable_qemu) run.addArg("-fqemu");
-    if (b.enable_rosetta) run.addArg("-frosetta");
-    if (b.enable_wasmtime) run.addArg("-fwasmtime");
-    if (b.enable_wine) run.addArg("-fwine");
-    if (b.libc_runtimes_dir) |runtimes| run.addArgs(&.{ "--libc-runtimes", runtimes });
     // Keep nested build parallelism and summaries aligned with this workspace.
     run.addArg("-j8");
     run.addArg("--summary");
     run.addArg("all");
-    if (b.cache_root.path) |cache| {
-        run.addArg("--cache-dir");
-        run.addArg(b.fmt("{s}/consumer", .{cache}));
+    run.addArg("--cache-dir");
+    run.addDirectoryArg2(
+        .{ .relative = .{ .base = .local_cache, .sub_path = "consumer" } },
+        .{ .make_absolute = true },
+    );
+    inline for (.{ "ZIG_GLOBAL_CACHE_DIR", "ZIG_LIB_DIR" }) |name| {
+        if (b.graph.environ_map.get(name)) |value| run.setEnvironmentVariable(name, value);
     }
-    // Share the resolved global cache to avoid duplicate package fetches.
-    if (b.graph.global_cache_root.path) |global_cache| {
-        run.addArg("--global-cache-dir");
-        run.addArg(global_cache);
-    }
-    // Resolve a custom prefix against this build, not the nested consumer cwd.
+    // Use the parent's install prefix for any nested installation.
     // DESTDIR is inherited through the environment.
-    const default_prefix = b.build_root.join(b.allocator, &.{"zig-out"}) catch @panic("OOM");
-    if (!std.mem.eql(u8, b.install_prefix, default_prefix)) {
-        const prefix = if (std.fs.path.isAbsolute(b.install_prefix))
-            b.install_prefix
-        else
-            b.pathJoin(&.{ b.graph.cache.cwd, b.install_prefix });
-        run.addArg("--prefix");
-        run.addArg(prefix);
-    }
+    run.addArg("--prefix");
+    run.addDirectoryArg2(
+        .{ .relative = .{ .base = .install_prefix } },
+        .{ .make_absolute = true },
+    );
     // Pass caller args after `--`, separate from the nested build options.
     // This forwards consumer arguments such as `--provider`.
-    if (b.args) |args| {
-        run.addArg("--");
-        run.addArgs(args);
-    }
+    run.addArg("--");
+    run.addPassthruArgs();
     run.has_side_effects = true;
     return run;
 }
 
-/// Returns whether this build can execute the target with its enabled runners.
+/// Returns whether this build can execute the target natively.
+/// Zig 0.17 does not expose third-party runner flags while configuring.
 fn hostCanExecute(b: *std.Build, target: std.Build.ResolvedTarget) bool {
-    const host = &b.graph.host.result;
-    const candidate = &target.result;
+    const host = b.graph.host.result;
     const options: std.zig.system.GetExternalExecutorOptions = .{
-        .allow_darling = b.enable_darling,
-        .allow_qemu = b.enable_qemu,
-        .allow_wasmtime = b.enable_wasmtime,
-        .allow_wine = b.enable_wine,
-        .qemu_fixes_dl = candidate.isGnuLibC() and b.libc_runtimes_dir != null,
+        .host_cpu_arch = host.cpu.arch,
+        .host_os_tag = host.os.tag,
+        .link_mode = .dynamic,
         .link_libc = true,
     };
-    return switch (std.zig.system.getExternalExecutor(b.graph.io, host, candidate, options)) {
-        .native, .rosetta => true,
-        .wine, .wasmtime, .darling => true,
-        // GNU libc QEMU targets require an explicit runtime directory to run.
-        .qemu => !(candidate.isGnuLibC() and b.libc_runtimes_dir == null),
-        // No enabled executor, or the target has no dynamic loader.
-        .bad_dl, .bad_os_or_cpu => false,
+    return switch (std.zig.system.getExternalExecutor(b.graph.io, &target.result, options)) {
+        .native => true,
+        else => false,
     };
 }
 
 /// Writes upstream-compatible `sqlite3.pc` metadata and installs it.
 /// Its `prefix` is relative to `pcfiledir`, so it works under any install prefix.
 /// `Libs.private` lists target-specific libraries for static consumers.
-fn add_pkg_config(b: *std.Build, platform: Platform, linkage: std.builtin.LinkMode) void {
+fn add_pkg_config(b: *std.Build, platform: Platform, linkage: std.lang.LinkMode) void {
     const files = b.addWriteFiles();
     // Depend on the install-file step so `sqlite3.pc` ships with `zig build`.
     const install_pc = b.addInstallFileWithDir(
@@ -605,7 +587,7 @@ pub fn build(b: *std.Build) void {
     const library: Library = if (use_system) .system else .bundled;
 
     const linkage_option = b.option(
-        std.builtin.LinkMode,
+        std.lang.LinkMode,
         "linkage",
         "Deliver the native library as a static archive (the default) or as a real " ++
             "shared object with upstream's libsqlite3.so.0 ABI name. This selects " ++
@@ -617,7 +599,7 @@ pub fn build(b: *std.Build) void {
 
     // Bundled mode defaults to static; system mode follows Zig's dynamic default.
     // Preserve each mode's default independently.
-    const linkage: std.builtin.LinkMode = linkage_option orelse
+    const linkage: std.lang.LinkMode = linkage_option orelse
         (if (library == .system) .dynamic else .static);
 
     // Runtime dispatch is independent of linkage and does not change delivery.
@@ -677,7 +659,7 @@ pub fn build(b: *std.Build) void {
     // The smoke run builds the executable without depending on installation.
     const run_example = b.addRunArtifact(example);
     run_example.has_side_effects = true;
-    if (b.args) |args| run_example.addArgs(args);
+    run_example.addPassthruArgs();
     b.step("smoke", "Run the deterministic example program").dependOn(&run_example.step);
 
     // Root the test step in `tests.zig` so Zig discovers its test blocks.
@@ -698,7 +680,7 @@ pub fn build(b: *std.Build) void {
     b.step("test", "Run the behavioural tests").dependOn(&run_tests.step);
 
     // Run the separate consumer with this graph's resolved mode.
-    // Install rather than run when no executor can handle the target.
+    // Cross targets install; Zig 0.17 exposes no third-party runner flags at configuration time.
     b.step("consumer", "Build or run the consumer/ package for the selected target")
         .dependOn(&runConsumer(b, target, optimize, library, deliveredLinkage(target, linkage), runtime_loaded).step);
 
@@ -762,11 +744,14 @@ fn addOracle(b: *std.Build) void {
         "Run upstream's sqlite3 shell over tools/fixture/aggregate.sql and " ++
             "compare its output with tools/fixture/expected.tsv",
     );
-    oracle.dependOn(b.getInstallStep());
     const run = b.addSystemCommand(&.{"bash"});
     run.setName("sqlite3 fixture oracle");
-    run.addFileArg(b.path("tools/check-oracle.sh"));
-    run.addArg(b.getInstallPath(.bin, shell.name));
+    run.step.dependOn(b.getInstallStep());
+    run.addFileArg2(b.path("tools/check-oracle.sh"), .{});
+    run.addFileArg2(
+        .{ .relative = .{ .base = .install_bin, .sub_path = shell.name } },
+        .{ .make_absolute = true },
+    );
     // The script writes a temporary file; its exit code reports the comparison.
     run.has_side_effects = true;
     oracle.dependOn(&run.step);
@@ -781,13 +766,13 @@ fn targetHasDynamicLinker(target: std.Build.ResolvedTarget) bool {
 /// All build paths use this result to keep artifacts and metadata consistent.
 fn deliveredLinkage(
     target: std.Build.ResolvedTarget,
-    requested: std.builtin.LinkMode,
-) std.builtin.LinkMode {
+    requested: std.lang.LinkMode,
+) std.lang.LinkMode {
     if (requested == .static) return .static;
     if (targetHasDynamicLinker(target)) return .dynamic;
 
     const os_tag = target.result.os.tag;
-    const message = std.fmt.allocPrint(std.heap.page_allocator,
+    const message = std.heap.page_allocator.print(
         \\zig build: -Dlinkage=dynamic was asked for {s}, whose operating system has
         \\no dynamic linker, so no shared object can be built or loaded there.
         \\std.Target.DynamicLinker.kind reports `{s}` for it, which is what this

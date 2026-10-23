@@ -103,7 +103,7 @@ pub const Status = enum(c_int) {
 
     /// Returns this status's integer code.
     pub fn code(self: Status) c_int {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 
     /// Returns a matching `Status`, or null when `raw` is not a member.
@@ -138,7 +138,7 @@ pub const ColumnType = enum(c_int) {
 
     /// Returns this column class's integer code.
     pub fn code(self: ColumnType) c_int {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 
     /// The class this code names, or null when it is not one of the five.

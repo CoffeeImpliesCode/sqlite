@@ -125,21 +125,21 @@ pub const Phase = enum(u8) {
 /// Publishes table writes with release ordering; routed calls read readiness with acquire ordering.
 /// Kept in the dispatch so every wrapper reads the same global flag.
 pub const Ready = struct {
-    phase: std.atomic.Value(u8) = .init(@intFromEnum(Phase.not_loaded)),
+    phase: std.atomic.Value(u8) = .init(@backingInt(Phase.not_loaded)),
 
     /// True after the table is published.
     pub fn isReady(self: *const Ready) bool {
-        return self.phase.load(.acquire) == @intFromEnum(Phase.ready);
+        return self.phase.load(.acquire) == @backingInt(Phase.ready);
     }
 
     /// Reads the current loader phase.
     pub fn state(self: *const Ready) Phase {
-        return @enumFromInt(self.phase.load(.acquire));
+        return @fromBackingInt(@intCast(self.phase.load(.acquire)));
     }
 
     /// Publishes a phase change with release ordering.
     pub fn set(self: *Ready, value: Phase) void {
-        self.phase.store(@intFromEnum(value), .release);
+        self.phase.store(@backingInt(value), .release);
     }
 };
 
