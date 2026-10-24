@@ -13,9 +13,10 @@ Based on Fossil check-in `bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e
 
 - Zig compiles `src/sqlite3.c` and upstream's `src/shell.c`; the build does not run `configure`, autosetup, make, CMake, or TCL, and it downloads no source.
 - The build defines no `SQLITE_*` configuration macros. JSON functions follow SQLite's default (included unless `SQLITE_OMIT_JSON` is set, which this build does not do); FTS5, math functions, RTREE, and column metadata are not enabled.
-- The default build delivers `libsqlite3.a`, `sqlite3`, both public headers, a relocatable `sqlite3.pc`, and license/provenance records. `zig build` compiles the example; `zig build test`, `zig build smoke`, `zig build oracle`, and `zig build consumer` are separate steps. `zig build check` compiles its target matrix and does not run it.
+- The default build delivers `libsqlite3.a`, `sqlite3`, both public headers, a relocatable `sqlite3.pc`, and license/provenance records. `zig build` compiles the example; `zig build test`, `zig build smoke`, `zig build oracle`, and `zig build consumer` are separate steps. On targets with a dynamic linker, `test` also builds the consumer against a bundled default-feature shared provider, checks copied text/blob bindings, and checks that feature-dependent symbols are absent. This consumer is compile-only on Linux musl, where its static libc cannot load shared providers; linked behavioral tests still run. `zig build check` compiles its target matrix and does not run it.
 - `-Dlinkage=static|dynamic` selects the installed native library; static is the bundled default and system mode defaults to dynamic. On ELF, dynamic delivery uses file name `libsqlite3.so.0.53.4` and soname `libsqlite3.so.0`.
 - `-Druntime=true` (default off) routes Zig calls through an explicit provider loader; it is independent of delivered linkage. `-Dsystem=true` (default off, or `-fsys=sqlite3`) selects an installed library instead of the bundled source and does not install this package's library or shell. System headers must be on the compiler's default include path.
+- Runtime consumers accept `--provider <absolute-path>` after `--`, or `SQLITE_TEST_PROVIDER` from the current invocation's environment. Native Linux `test` also exercises the nested consumer with an environment-only bundled provider.
 - `-Dtarget=<triple>` selects a compile target; `-Doptimize=<mode>` selects the optimization mode. The package manifest has no build dependencies.
 
 ## Support matrix
@@ -29,7 +30,9 @@ The default `zig build check` graph compiles these targets; this table describes
 | `x86_64-windows-gnu` | None | Uses Windows loader and C runtime |
 | `wasm32-wasi` | None | Static only; upstream selects single-thread mode and omits extension loading |
 
-The generic Unix rule also requests `-ldl` on NetBSD and OpenBSD; whether that library is available and whether those targets need separate `-lm` or `-lpthread` are unknown. Runtime loading is unavailable on WASI, Emscripten, and freestanding targets. Shared delivery needs a dynamic linker; applying `-Dlinkage=dynamic` to the current six-target graph fails when it reaches WASI.
+The generic Unix rule also requests `-ldl` on NetBSD and OpenBSD; whether that library is available and whether those targets need separate `-lm` or `-lpthread` are unknown. Runtime loading is unavailable on WASI, Emscripten, and freestanding targets. Shared delivery needs a dynamic linker. Native `check` builds omit WASI when `-Dlinkage=dynamic` or `-Druntime=true` is selected; the other five targets retain the selected mode. An explicit `-Dtarget` checks only that target; unsupported shared delivery remains an error.
+
+Linux targets without an ABI suffix default to musl. Runtime dispatch requires a dynamically linked musl executable and an installed target musl loader; static musl's `dlopen` is unsupported.
 
 ## Consumption
 

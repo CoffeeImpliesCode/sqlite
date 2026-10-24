@@ -97,18 +97,18 @@ fn programName(
 
 /// Per-target C link and program settings.
 const Platform = struct {
-/// No platform-specific `SQLITE_*` macros are defined.
+    /// No platform-specific `SQLITE_*` macros are defined.
     macros: []const [2][]const u8,
-/// Whether math functions need a separate library.
+    /// Whether math functions need a separate library.
     separate_m: bool,
-/// Whether `dlopen` needs a separate library.
+    /// Whether `dlopen` needs a separate library.
     separate_dl: bool,
-/// Whether pthread needs a separate library.
-/// Windows target marker; `SQLITE_API` needs no export list by default.
+    /// Whether pthread needs a separate library.
+    /// Windows target marker; `SQLITE_API` needs no export list by default.
     separate_pthread: bool,
     dll: bool,
-/// Program-only WASI emulation flags; the library needs none.
-/// Keep these separate from platform macros and link requirements.
+    /// Program-only WASI emulation flags; the library needs none.
+    /// Keep these separate from platform macros and link requirements.
     wasi_emulation: []const [2][]const u8,
 
     fn forTarget(target: std.Build.ResolvedTarget) Platform {
@@ -382,13 +382,12 @@ fn installedRPath(target: std.Build.ResolvedTarget) ?[]const u8 {
 fn add_target_check(
     b: *std.Build,
     step: *std.Build.Step,
-    query: std.Target.Query,
+    cross_target: std.Build.ResolvedTarget,
     optimize: std.lang.Optimize,
     library: Library,
     linkage: std.lang.LinkMode,
     runtime_loaded: bool,
 ) void {
-    const cross_target = b.resolveTargetQuery(query);
     // Matrix artifact names include the target triple.
     const triple = cross_target.result.zigTriple(b.allocator) catch @panic("unspellable target");
 
@@ -418,7 +417,7 @@ fn add_target_check(
         .root_module = example_mod,
     }).step);
 
-        // System mode has no local library or shell to link.
+    // System mode has no local library or shell to link.
     if (cross.c_lib) |c_lib| {
         step.dependOn(&add_program(
             b,
@@ -478,9 +477,8 @@ fn runConsumer(
         .{ .relative = .{ .base = .local_cache, .sub_path = "consumer" } },
         .{ .make_absolute = true },
     );
-    inline for (.{ "ZIG_GLOBAL_CACHE_DIR", "ZIG_LIB_DIR" }) |name| {
-        if (b.graph.environ_map.get(name)) |value| run.setEnvironmentVariable(name, value);
-    }
+    // Inherit the maker's current environment; a configurer-time clone becomes stale.
+    // This includes SQLITE_TEST_PROVIDER, ZIG_GLOBAL_CACHE_DIR and ZIG_LIB_DIR.
     // Use the parent's install prefix for any nested installation.
     // DESTDIR is inherited through the environment.
     run.addArg("--prefix");
@@ -677,7 +675,68 @@ pub fn build(b: *std.Build) void {
     });
     const run_tests = b.addRunArtifact(unit_tests);
     run_tests.has_side_effects = true;
-    b.step("test", "Run the behavioural tests").dependOn(&run_tests.step);
+    const test_step = b.step("test", "Run the behavioural tests and bundled-provider consumer");
+    test_step.dependOn(&run_tests.step);
+    if (targetHasDynamicLinker(target)) {
+        const runtime_graph = addGraph(b, target, optimize, .bundled, .dynamic, true, false);
+        const consumer_mod = b.createModule(.{
+            .root_source_file = b.path("consumer/src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        consumer_mod.addImport(lib_name, runtime_graph.module);
+        const runtime_consumer = b.addExecutable(.{
+            .name = "sqlite3-default-provider-consumer",
+            .root_module = consumer_mod,
+        });
+        const run_runtime_consumer = b.addRunArtifact(runtime_consumer);
+        run_runtime_consumer.addArg("--provider");
+        run_runtime_consumer.addFileArg2(runtime_graph.c_lib.?.getEmittedBin(), .{ .make_absolute = true });
+        run_runtime_consumer.addArg("--expect-default-features");
+        run_runtime_consumer.has_side_effects = true;
+        // This consumer links musl statically, whose dlopen always returns NULL.
+        const can_run_runtime_consumer = !target.result.isMuslLibC();
+        if (can_run_runtime_consumer) {
+            test_step.dependOn(&run_runtime_consumer.step);
+        } else {
+            test_step.dependOn(&runtime_consumer.step);
+            test_step.dependOn(&runtime_graph.c_lib.?.step);
+        }
+        if (can_run_runtime_consumer and b.graph.host.result.os.tag == .linux and target.result.os.tag == .linux and hostCanExecute(b, target)) {
+            const prime_consumer = b.addSystemCommand(&.{ "env", "-u", "SQLITE_TEST_PROVIDER" });
+            prime_consumer.setName("configure consumer without provider");
+            const env_consumer = b.addSystemCommand(&.{"env"});
+            env_consumer.setName("consumer package with environment-only provider");
+            env_consumer.addFileArg2(runtime_graph.c_lib.?.getEmittedBin(), .{
+                .prefix = "SQLITE_TEST_PROVIDER=",
+                .make_absolute = true,
+            });
+            for ([_]*std.Build.Step.Run{ prime_consumer, env_consumer }) |run| {
+                run.addArgs(&.{ b.graph.zig_exe, "build", "--build-file" });
+                run.addFileArg2(b.path("build.zig"), .{ .make_absolute = true });
+                run.addArgs(&.{ "consumer", "-Druntime=true", "-fno-sys=sqlite3" });
+                run.addArg(b.fmt("-Dtarget={s}", .{
+                    target.query.zigTriple(b.allocator) catch @panic("OOM"),
+                }));
+                run.addArg(b.fmt("-Dcpu={s}", .{
+                    target.query.serializeCpuAlloc(b.allocator) catch @panic("OOM"),
+                }));
+                run.addArg(b.fmt("-Doptimize={s}", .{@tagName(optimize)}));
+                run.addArg("--cache-dir");
+                run.addDirectoryArg2(
+                    .{ .relative = .{ .base = .local_cache, .sub_path = "consumer-env" } },
+                    .{ .make_absolute = true },
+                );
+                run.addArg("-j8");
+            }
+            prime_consumer.addArg("--print-configuration-path");
+            prime_consumer.has_side_effects = true;
+            env_consumer.step.dependOn(&prime_consumer.step);
+            env_consumer.addArgs(&.{ "--", "--expect-default-features" });
+            env_consumer.has_side_effects = true;
+            test_step.dependOn(&env_consumer.step);
+        }
+    }
 
     // Run the separate consumer with this graph's resolved mode.
     // Cross targets install; Zig 0.17 exposes no third-party runner flags at configuration time.
@@ -688,15 +747,16 @@ pub fn build(b: *std.Build) void {
     const check_step = b.step(
         "check",
         "Compile the native library, the facade, the tests, the example and " ++
-            "the sqlite3 shell for all six check targets without running any of them",
+            "the sqlite3 shell for supported check targets without running any of them",
     );
     if (!target.query.isNative()) {
-        add_target_check(b, check_step, target.query, optimize, library, linkage, runtime_loaded);
+        add_target_check(b, check_step, target, optimize, library, linkage, runtime_loaded);
     } else {
-        // Walk the full matrix for either linkage; unsupported shared delivery fails per target.
-        // Slice this pointer-to-array before iteration; `.*` is optional/error-union syntax.
+        // The matrix omits targets without loaders when delivery or dispatch needs one.
         for (check_targets[0..]) |query| {
-            add_target_check(b, check_step, query, optimize, library, linkage, runtime_loaded);
+            const cross_target = b.resolveTargetQuery(query);
+            if ((linkage == .dynamic or runtime_loaded) and !targetHasDynamicLinker(cross_target)) continue;
+            add_target_check(b, check_step, cross_target, optimize, library, linkage, runtime_loaded);
         }
     }
 

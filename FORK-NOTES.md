@@ -13,6 +13,7 @@ The native files under `src/` are upstream's amalgamation, headers, and shell; t
 | `runtime/graph.zig` | Connects the loader to Zig's translated declarations for runtime dispatch. |
 | `runtime/generate.zig` | Generates target-specific dispatch from the build's translated declarations instead of checked-in bindings. |
 | `runtime/sync.c` | Implements the loader's process-wide mutex, condition variable, and thread identity. |
+| `runtime/bind.c` | Forms `SQLITE_TRANSIENT` in C and calls the loaded text/blob bind function without constructing a misaligned Zig function pointer. |
 | `runtime/sync.h` | Declares the synchronization interface used by the runtime loader. |
 | `tests.zig` | Adds behavioral tests against hand-computed aggregation results and an independent Zig implementation. |
 | `smoke.zig` | Adds a small Zig executable that exercises the facade. |
@@ -37,10 +38,10 @@ The native files under `src/` are upstream's amalgamation, headers, and shell; t
 
 ## Platform boundaries
 
-- WASI is static-only: upstream selects `SQLITE_THREADSAFE=0` and omits loadable extensions. Runtime loading is unavailable there; requesting dynamic linkage for the full matrix reaches WASI, which has no dynamic linker, and fails configuration.
-- Runtime loading is also unavailable on Emscripten and freestanding targets. The routed `SQLITE_TRANSIENT` sentinel requires function-pointer alignment of one; linked mode does not have this constraint.
+- WASI is static-only: upstream selects `SQLITE_THREADSAFE=0` and omits loadable extensions. Runtime loading is unavailable there. The check matrix filters targets by the selected delivery and dispatch requirements; see the support matrix in `README.md`.
+- Runtime loading is also unavailable on Emscripten and freestanding targets. Facade text/blob binds use the C adapter on runtime-loaded builds; linked-only bind declarations are excluded from those builds to avoid native-symbol relocations in debug information. Raw translated sentinel limits are in `README.zig.md`.
 - Windows uses the Windows loader and C runtime, so the build names no separate Unix link libraries. macOS needs `-lm`; `dlopen` and pthread are in libc.
 - The generic Unix link rule requests `-ldl` on NetBSD and OpenBSD; availability of that library and need for separate `-lm` or `-lpthread` are not established.
-- A runtime provider must export every declaration in the translated header; a system SQLite missing any required symbol is rejected by the loader.
+- Runtime dispatch permits absent feature- and target-dependent exports listed in `runtime/graph.zig`; missing required symbols still reject the provider. Carray bindings are declared without a feature guard in `src/sqlite3.h`, but their implementations require `SQLITE_ENABLE_CARRAY` and virtual-table support (`src/sqlite3.c:233248`). See `README.zig.md` for availability queries and call behavior.
 - Zig 0.17 exposes no configure-time runner flags or install-prefix string, so cross-target consumer builds install under the parent prefix.
-- Zig 0.17 consumer builds use `--cache-dir <path>` and inherit `ZIG_GLOBAL_CACHE_DIR` and `ZIG_LIB_DIR` from the parent working directory.
+- Zig 0.17 consumer builds use `--cache-dir <path>` and inherit the maker's current environment, including `SQLITE_TEST_PROVIDER`, `ZIG_GLOBAL_CACHE_DIR`, and `ZIG_LIB_DIR`. Cached configurations do not capture an earlier provider selection.

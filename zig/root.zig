@@ -200,7 +200,7 @@ pub const Error = error{
     BindFailed,
     /// Stepping failed; the statement remains owned and must be reset or finalized.
     StepFailed,
-    /// A column accessor returned no value; read `Db.errcode` immediately to distinguish SQL NULL from failure.
+    /// A column contains SQL NULL or its conversion failed.
     NullValue,
     /// Finalization failed; SQLite destroys the statement either way.
     FinalizeFailed,
@@ -291,7 +291,6 @@ pub const Db = struct {
     }
 
     /// Returns this connection's most recent SQLite result code.
-    /// Read it immediately after `error.NullValue` to distinguish SQL NULL from accessor failure.
     pub fn errcode(self: Db) c_int {
         return c.sqlite3_errcode(self.handle);
     }
@@ -424,9 +423,12 @@ pub const Statement = struct {
     /// SQL NULL or conversion failure returns `error.NullValue`; invalid indexes return `error.ColumnOutOfRange`.
     pub fn columnText(self: Statement, index: usize) Error![]const u8 {
         try self.checkColumn(index);
+        if (c.sqlite3_column_type(self.handle, @intCast(index)) == c.SQLITE_NULL)
+            return error.NullValue;
         const text = c.sqlite3_column_text(self.handle, @intCast(index));
         if (isNull(@TypeOf(text), text)) return error.NullValue;
         const len = c.sqlite3_column_bytes(self.handle, @intCast(index));
+        if (len == 0) return "";
         return text[0..@intCast(len)];
     }
 
@@ -434,18 +436,23 @@ pub const Statement = struct {
     /// Returns `error.ColumnOutOfRange` for invalid indexes and `error.NullValue` for SQL NULL or conversion failure.
     pub fn columnBlob(self: Statement, index: usize) Error![]const u8 {
         try self.checkColumn(index);
-        // `checkColumn` and `columnType` reject the same indexes.
-        if (self.columnType(index).? == .null) return error.NullValue;
+        const kind = c.sqlite3_column_type(self.handle, @intCast(index));
+        if (kind == c.SQLITE_NULL) return error.NullValue;
+        // Reading a BLOB's size does not convert or materialize it; preserve OOM failures for nonempty zeroblobs.
+        const blob_len: ?c_int = if (kind == c.SQLITE_BLOB)
+            c.sqlite3_column_bytes(self.handle, @intCast(index))
+        else
+            null;
+        if (blob_len) |len| {
+            if (len == 0) return "";
+        }
         const bytes = c.sqlite3_column_blob(self.handle, @intCast(index));
         if (isNull(@TypeOf(bytes), bytes)) {
-            // A NULL pointer with a non-NULL class can indicate conversion failure.
-            if (c.sqlite3_db_handle(self.handle)) |owner| {
-                if (c.sqlite3_errcode(owner) != c.SQLITE_OK) return error.NullValue;
-            }
-            // NULL plus `SQLITE_OK` denotes an empty BLOB.
-            return "";
+            // TEXT-to-BLOB makes no conversion; a missing buffer denotes empty text (src/sqlite3.c:5826).
+            if (kind == c.SQLITE_TEXT) return "";
+            return error.NullValue;
         }
-        const len = c.sqlite3_column_bytes(self.handle, @intCast(index));
+        const len = blob_len orelse c.sqlite3_column_bytes(self.handle, @intCast(index));
         const raw: [*]const u8 = @ptrCast(bytes);
         return raw[0..@intCast(len)];
     }
@@ -475,20 +482,19 @@ pub const Statement = struct {
     /// SQLite copies the bytes; returns `error.BindFailed` on failure.
     pub fn bindText(self: Statement, index: usize, value: []const u8) Error!void {
         const code = if (runtime_loaded)
-            c.sqlite3_bind_text(
+            c.rtBindTextTransient(
                 self.handle,
                 @intCast(index),
                 @as([*:0]const u8, @ptrCast(value.ptr)),
                 @intCast(value.len),
-                c.SQLITE_TRANSIENT,
             )
         else
-            sqlite3_bind_text(
+            LinkedBindings.sqlite3_bind_text(
                 self.handle,
                 @intCast(index),
                 @as([*:0]const u8, @ptrCast(value.ptr)),
                 @intCast(value.len),
-                transient,
+                LinkedBindings.transient,
             );
         if (code != c.SQLITE_OK) return error.BindFailed;
     }
@@ -497,20 +503,19 @@ pub const Statement = struct {
     /// SQLite copies the bytes; returns `error.BindFailed` on failure.
     pub fn bindBlob(self: Statement, index: usize, value: []const u8) Error!void {
         const code = if (runtime_loaded)
-            c.sqlite3_bind_blob(
+            c.rtBindBlobTransient(
                 self.handle,
                 @intCast(index),
                 @as(*const anyopaque, @ptrCast(value.ptr)),
                 @intCast(value.len),
-                c.SQLITE_TRANSIENT,
             )
         else
-            sqlite3_bind_blob(
+            LinkedBindings.sqlite3_bind_blob(
                 self.handle,
                 @intCast(index),
                 @as(*const anyopaque, @ptrCast(value.ptr)),
                 @intCast(value.len),
-                transient,
+                LinkedBindings.transient,
             );
         if (code != c.SQLITE_OK) return error.BindFailed;
     }
@@ -540,26 +545,27 @@ pub const Statement = struct {
     }
 };
 
-// `SQLITE_TRANSIENT` is the all-ones address SQLite treats as a copy sentinel.
-// Linked binds use an untyped pointer to avoid translate-c's misaligned function-pointer type.
-// Runtime dispatch uses the translated constant and requires one-byte alignment.
-const transient: ?*const anyopaque = @ptrFromInt(std.math.maxInt(usize));
+// Exclude linked externs from runtime builds, including debug-info relocations.
+const LinkedBindings = if (runtime_loaded) struct {} else struct {
+    // SQLite's all-ones copy sentinel has no function-pointer alignment requirement.
+    const transient: ?*const anyopaque = @ptrFromInt(std.math.maxInt(usize));
 
-extern fn sqlite3_bind_text(
-    statement: ?*c.sqlite3_stmt,
-    index: c_int,
-    text: [*c]const u8,
-    len: c_int,
-    destructor: ?*const anyopaque,
-) c_int;
+    extern fn sqlite3_bind_text(
+        statement: ?*c.sqlite3_stmt,
+        index: c_int,
+        text: [*c]const u8,
+        len: c_int,
+        destructor: ?*const anyopaque,
+    ) c_int;
 
-extern fn sqlite3_bind_blob(
-    statement: ?*c.sqlite3_stmt,
-    index: c_int,
-    value: ?*const anyopaque,
-    len: c_int,
-    destructor: ?*const anyopaque,
-) c_int;
+    extern fn sqlite3_bind_blob(
+        statement: ?*c.sqlite3_stmt,
+        index: c_int,
+        value: ?*const anyopaque,
+        len: c_int,
+        destructor: ?*const anyopaque,
+    ) c_int;
+};
 
 /// Returns the provider's NUL-terminated SQLite version string as a borrowed slice.
 /// The string remains valid while the provider is loaded.

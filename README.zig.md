@@ -36,9 +36,11 @@ Facade errors: `PrepareFailed`, `NoStatement`, `BindFailed`, `StepFailed`, `Null
 | `columnName(i)`, `declType(i)`, `columnType(i)` | Zero-based metadata. Name/type may be absent; `columnType` describes the current row, with SQL NULL as `.null`. |
 | `columnInt64(i)`, `columnDouble(i)`, `columnText(i)`, `columnBlob(i)` | Zero-based reads; out of range is `ColumnOutOfRange`. Numeric reads use SQLite conversions; text/blob return `NullValue` for SQL NULL or failed conversion. |
 | `bindInt64(i, value)`, `bindDouble(i, value)`, `bindNull(i)`, `bindText(i, bytes)`, `bindBlob(i, bytes)` | One-based parameters. Text and blob bytes are copied; explicit text length preserves embedded NUL bytes. |
-| `reset()` | Rewinds the statement and clears all bindings. |
+| `reset()` | Rewinds the statement and clears its bindings. |
 
 Column text/blob data is borrowed until conversion, the next `step`, `reset`, or `finalize`; never free it. Names, declared types, and SQL text are borrowed until finalization. Empty text/blob differs from SQL NULL.
+
+The translated `c.SQLITE_TRANSIENT` macro requires function-pointer alignment of one. On targets with stricter alignment, use `Statement.bindText` and `Statement.bindBlob`; both copy input in linked and runtime-loaded builds.
 
 ## Runtime loading
 
@@ -46,7 +48,9 @@ Column text/blob data is borrowed until conversion, the next `step`, `reset`, or
 
 `LoadSource` accepts `.path = absolute_path` or `.system = basename_or_soname`; empty, oversized, NUL-containing, relative, and system names with path components are rejected. There is no path-to-name fallback. The same request is idempotent; a different request returns `ProviderMismatch` without replacement.
 
-`LoadError`: `EmptySource`, `SourceTooLong`, `InvalidSource`, `UnsupportedTarget`, `OpenFailed`, `MissingSymbol`, `ValidationFailed`, `ProviderMismatch`, `ReentrantLoad`. A provider must export all translated declarations (365 functions and `sqlite3_version`). Before publication, the loader checks the SQLite 3 ABI family and an in-memory open/prepare/step/integer-read sequence.
+`LoadError`: `EmptySource`, `SourceTooLong`, `InvalidSource`, `UnsupportedTarget`, `OpenFailed`, `MissingSymbol`, `ValidationFailed`, `ProviderMismatch`, `ReentrantLoad`. Column-origin metadata (`sqlite3_column_database_name[16]`, `sqlite3_column_table_name[16]`, `sqlite3_column_origin_name[16]`), RTree callbacks, Carray bindings (`sqlite3_carray_bind`, `sqlite3_carray_bind_v2`), unlock-notify, statement scanstatus, snapshot functions, and debug mutex checks (`sqlite3_mutex_held`, `sqlite3_mutex_notheld`) are optional exports. `sqlite3_win32_set_directory`, `sqlite3_win32_set_directory8`, and `sqlite3_win32_set_directory16` are optional outside Windows and required on Windows. All other translated symbols are required; `MissingSymbol` prints the missing export name. Before publication, the loader checks the SQLite 3 ABI family and an in-memory open/prepare/step/integer-read sequence.
+
+After loading, `c.optional_symbols` lists feature- and target-dependent exports; `c.optional(index)` reports availability for a compile-time index. Calling an unavailable optional function panics with its symbol name. These availability APIs exist only in runtime-loaded builds.
 
 ## Library information
 

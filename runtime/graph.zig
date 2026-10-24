@@ -11,8 +11,22 @@ const sync_prefix = "sqlite_rt";
 /// Empty: `sqlite3.h:35` includes only `<stdarg.h>`, which declares no functions.
 const libc_noise = "";
 
-/// Empty; this package's amalgamation defines every function declared by `sqlite3.h`.
-const provider_optional = "";
+/// These header declarations require opt-in features absent from the default amalgamation.
+const provider_optional =
+    "sqlite3_column_database_name,sqlite3_column_database_name16," ++
+    "sqlite3_column_table_name,sqlite3_column_table_name16," ++
+    "sqlite3_column_origin_name,sqlite3_column_origin_name16," ++
+    "sqlite3_rtree_geometry_callback,sqlite3_rtree_query_callback," ++
+    "sqlite3_carray_bind,sqlite3_carray_bind_v2," ++
+    "sqlite3_unlock_notify," ++
+    "sqlite3_stmt_scanstatus,sqlite3_stmt_scanstatus_v2,sqlite3_stmt_scanstatus_reset," ++
+    "sqlite3_snapshot_get,sqlite3_snapshot_open,sqlite3_snapshot_free," ++
+    "sqlite3_snapshot_cmp,sqlite3_snapshot_recover," ++
+    "sqlite3_mutex_held,sqlite3_mutex_notheld";
+
+/// `sqlite3.h` declares these on every target; SQLite implements them only on Windows.
+const provider_windows_only =
+    "sqlite3_win32_set_directory,sqlite3_win32_set_directory8,sqlite3_win32_set_directory16";
 
 /// Empty; extension-only `sqlite3_api` is absent from the translated `sqlite3.h` interface.
 const provider_excluded = "";
@@ -86,8 +100,9 @@ fn createDispatchModule(
     });
     native.addImport("c_routed", dispatch);
     dispatch.addImport("c_native", native);
+    dispatch.include_dirs.appendSlice(b.allocator, translate.include_dirs.items) catch @panic("OOM");
     dispatch.addCSourceFiles(.{
-        .files = &.{"runtime/sync.c"},
+        .files = &.{ "runtime/sync.c", "runtime/bind.c" },
         .flags = &.{b.fmt("-DRT_SYNC_PREFIX={s}", .{sync_prefix})},
         .language = .c,
     });
@@ -122,6 +137,10 @@ fn generateDispatch(
     if (provider_optional.len != 0) {
         run.addArg("--optional");
         run.addArg(provider_optional);
+    }
+    if (target.result.os.tag != .windows) {
+        run.addArg("--optional");
+        run.addArg(provider_windows_only);
     }
     if (provider_excluded.len != 0) {
         run.addArg("--exclude");

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-PublicDomain
 // See FORK-LICENSE.md for what that identifier covers.
 //! Describes SQLite's provider contract for the runtime loader.
-//! Requires all translated SQLite 3 symbols.
+//! Requires translated SQLite 3 symbols except feature- and target-dependent exports.
 //! Validates the version family, provider strings and an in-memory `SELECT 1` before publication.
 const std = @import("std");
 
@@ -96,13 +96,11 @@ pub fn Config(comptime dispatch: type) type {
             // Accept any SQLite 3 release and validate provider-owned strings, not exact version equality.
             // The header types both results as `const char *` (`src/sqlite3.h:189-190`).
             const libversion = dst.sqlite3_libversion();
-            if (nullPointer(libversion) or libversion[0] == 0) return
-                "sqlite3_libversion returned no version string, so this provider " ++
-                    "is not describing itself as a SQLite library";
+            if (nullPointer(libversion) or libversion[0] == 0) return "sqlite3_libversion returned no version string, so this provider " ++
+                "is not describing itself as a SQLite library";
             const sourceid = dst.sqlite3_sourceid();
-            if (nullPointer(sourceid) or sourceid[0] == 0) return
-                "sqlite3_sourceid returned no check-in string, so this provider " ++
-                    "is not describing itself as a SQLite library";
+            if (nullPointer(sourceid) or sourceid[0] == 0) return "sqlite3_sourceid returned no check-in string, so this provider " ++
+                "is not describing itself as a SQLite library";
 
             // Use `:memory:` so the provider check does not touch the filesystem (`src/sqlite3.h:3833-3835`).
             var handle: ?*dispatch.sqlite3 = null;
@@ -130,10 +128,9 @@ pub fn Config(comptime dispatch: type) type {
                 null,
             );
             // A NULL statement also means empty SQL; check the result code (`src/sqlite3.h:4539-4542`).
-            if (prepared != dispatch.SQLITE_OK or statement == null) return
-                "sqlite3_prepare_v2 could not compile the probe statement in this " ++
-                    "provider, so its tokenizer, parser and code generator are " ++
-                    "not usable";
+            if (prepared != dispatch.SQLITE_OK or statement == null) return "sqlite3_prepare_v2 could not compile the probe statement in this " ++
+                "provider, so its tokenizer, parser and code generator are " ++
+                "not usable";
 
             // Read only after `SQLITE_ROW`; the API has no status output (`src/sqlite3.h:5583`).
             const stepped = dst.sqlite3_step(statement);
@@ -142,18 +139,15 @@ pub fn Config(comptime dispatch: type) type {
             else
                 0;
             const finalized = dst.sqlite3_finalize(statement.?);
-            if (stepped != dispatch.SQLITE_ROW) return
-                "sqlite3_step did not return SQLITE_ROW for a one-row SELECT in " ++
-                    "this provider, so it cannot execute the probe statement";
-            if (value != probe_value) return
-                "sqlite3_column_int64 did not return the integer the probe " ++
-                    "selected, so this provider is not executing the SQL its " ++
-                    "header describes";
+            if (stepped != dispatch.SQLITE_ROW) return "sqlite3_step did not return SQLITE_ROW for a one-row SELECT in " ++
+                "this provider, so it cannot execute the probe statement";
+            if (value != probe_value) return "sqlite3_column_int64 did not return the integer the probe " ++
+                "selected, so this provider is not executing the SQL its " ++
+                "header describes";
             // `sqlite3_finalize` reports the last evaluation result (`src/sqlite3.h:5595-5600`).
-            if (finalized != dispatch.SQLITE_OK) return
-                "sqlite3_finalize reported an error for a statement that " ++
-                    "returned a row, which is a failure this provider cannot " ++
-                    "explain from the codes it returned";
+            if (finalized != dispatch.SQLITE_OK) return "sqlite3_finalize reported an error for a statement that " ++
+                "returned a row, which is a failure this provider cannot " ++
+                "explain from the codes it returned";
 
             return null;
         }

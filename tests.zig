@@ -260,6 +260,27 @@ test "an SQL NULL column is NullValue, and an empty string is not" {
     try std.testing.expectEqual(@as(usize, 0), (try st.columnText(0)).len);
 }
 
+test "empty text and blobs remain distinct from NULL after another statement fails" {
+    var db = try openMemory();
+    defer db.close();
+    var st = try db.prepare("SELECT ?1, ?2, NULL, '', x'', zeroblob(0)");
+    defer st.finalize() catch {};
+    try st.bindText(1, "");
+    try st.bindBlob(2, "");
+    try std.testing.expectEqual(sqlite.Step.row, try st.step());
+    try std.testing.expectEqual(sqlite.ColumnType.text, st.columnType(0).?);
+    try std.testing.expectEqual(sqlite.ColumnType.blob, st.columnType(1).?);
+
+    try std.testing.expectError(error.PrepareFailed, db.prepare("SELECT FROM"));
+    try std.testing.expectEqual(sqlite.c.SQLITE_ERROR, db.errcode());
+    inline for (.{ 0, 1, 3, 4, 5 }) |index| {
+        try std.testing.expectEqualStrings("", try st.columnBlob(index));
+        try std.testing.expectEqualStrings("", try st.columnText(index));
+    }
+    try std.testing.expectError(error.NullValue, st.columnText(2));
+    try std.testing.expectError(error.NullValue, st.columnBlob(2));
+}
+
 test "blob bytes and embedded NULs survive the round trip whole" {
     var db = try openMemory();
     defer db.close();
@@ -435,7 +456,6 @@ test "a connection closes with a live statement, and the statement is destroyed"
 
     try db.closeChecked();
     try std.testing.expect(db.handle == null);
-
 }
 
 test "a reset statement is reusable, and answers every row the value that went in" {

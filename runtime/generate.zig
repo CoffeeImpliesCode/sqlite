@@ -183,7 +183,7 @@ fn generate(
     options: Options,
 ) Failure!struct { dispatch: []const u8, native: []const u8 } {
     const source_z = try readSentinel(io, arena, options.translate);
-    var tree = try Ast.parse(arena, source_z, .zig);
+    var tree = try Ast.parse(arena, source_z, .{ .mode = .zig });
     defer tree.deinit(arena);
 
     if (tree.errors.len != 0) {
@@ -208,6 +208,7 @@ fn generate(
     try writePreamble(w, options, plan.dispatch_needs_root);
     try writeTableOpen(w);
     try writeTableClose(w, &plan);
+    try writeTransientBinds(w);
     for (plan.decls) |decl| switch (decl.class) {
         .copied => try writeCopied(w, arena, &tree, decl, &plan),
         // The patched translation supplies the root prologue; emitting it again would duplicate the declaration.
@@ -525,9 +526,7 @@ fn planVariable(
                 const type_last = tree.lastToken(type_node);
                 // Avoid `@TypeOf` on extern data, which can create a direct link.
                 // Re-exported named types preserve the translation's nominal identity.
-                decl.field_type = tree.source[
-                    tree.tokenStart(type_first)..tree.tokenStart(type_last) + tree.tokenSlice(type_last).len
-                ];
+                decl.field_type = tree.source[tree.tokenStart(type_first) .. tree.tokenStart(type_last) + tree.tokenSlice(type_last).len];
                 decl.address_value = true;
                 return decl;
             }
@@ -569,9 +568,7 @@ fn dataTypeText(
         );
         return error.UnsupportedDeclaration;
     };
-    const text = tree.source[
-        tree.tokenStart(tree.firstToken(type_node))..tree.tokenStart(last)
-    ];
+    const text = tree.source[tree.tokenStart(tree.firstToken(type_node))..tree.tokenStart(last)];
     if (std.mem.indexOfScalar(u8, text, '=') != null) {
         std.debug.print(
             "runtime/generate.zig: extern '{s}' is initialized; an exported object " ++
@@ -821,6 +818,38 @@ fn writeTableOpen(w: *Writer) !void {
         \\/// translated header's own declaration of that symbol. A field for a
         \\/// symbol the provider may not export is nullable and starts null.
         \\pub const Table = struct {
+        \\
+    );
+}
+
+fn writeTransientBinds(w: *Writer) Writer.Error!void {
+    try w.writeAll(
+        \\// The C adapter forms SQLITE_TRANSIENT without a Zig function-pointer value.
+        \\extern fn sqlite_rt_bind_text_transient(
+        \\    target: *const anyopaque,
+        \\    statement: ?*c_native.sqlite3_stmt,
+        \\    index: c_int,
+        \\    value: [*c]const u8,
+        \\    len: c_int,
+        \\) c_int;
+        \\
+        \\extern fn sqlite_rt_bind_blob_transient(
+        \\    target: *const anyopaque,
+        \\    statement: ?*c_native.sqlite3_stmt,
+        \\    index: c_int,
+        \\    value: ?*const anyopaque,
+        \\    len: c_int,
+        \\) c_int;
+        \\
+        \\pub fn rtBindTextTransient(statement: ?*c_native.sqlite3_stmt, index: c_int, value: [*c]const u8, len: c_int) c_int {
+        \\    requireReady("sqlite3_bind_text");
+        \\    return sqlite_rt_bind_text_transient(@ptrCast(table.sqlite3_bind_text), statement, index, value, len);
+        \\}
+        \\
+        \\pub fn rtBindBlobTransient(statement: ?*c_native.sqlite3_stmt, index: c_int, value: ?*const anyopaque, len: c_int) c_int {
+        \\    requireReady("sqlite3_bind_blob");
+        \\    return sqlite_rt_bind_blob_transient(@ptrCast(table.sqlite3_bind_blob), statement, index, value, len);
+        \\}
         \\
     );
 }
