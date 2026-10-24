@@ -36,12 +36,10 @@ Linux targets without an ABI suffix default to musl. Runtime dispatch requires a
 
 ## Consumption
 
-For a local checkout, add the package to a consumer's `build.zig.zon`:
+Fetch the published package into a consumer's `build.zig.zon`:
 
-```zig
-.dependencies = .{
-    .sqlite3 = .{ .path = "../sqlite" },
-},
+```sh
+zig fetch --save git+https://github.com/CoffeeImpliesCode/sqlite#v3.53.4
 ```
 
 The package name, dependency key, Zig module, and C artifact are all `sqlite3`:
