@@ -1,5 +1,7 @@
 # Changelog
 
+- Restore Forgejo verification on Zig 0.17.0, correct SQL compile-option and runtime-consumer checks, and test WASI's shared-delivery refusal.
+- Keep C undefined-behavior checks in trapping mode for Debug/safe libraries so plain C consumers need no Zig UBSan runtime; reject unsupported dynamic linkage without a build-script panic.
 - Read empty BLOBs and text as empty slices without consulting stale connection errors; preserve SQL NULL and conversion-failure errors.
 - Exclude linked-only text/blob bind declarations from runtime dispatch, avoiding unresolved native symbols in debug consumers while retaining the C sentinel adapter.
 - Fix runtime-loaded text/blob binds on AArch64 and RISC-V with a C sentinel adapter; add copy/empty-binding consumer checks and keep the static-musl provider consumer compile-only.

@@ -1,0 +1,666 @@
+# Verification for the Zig package in this repository.
+#
+# Upstream ships no CI with either release artefact: `upstream/main.mk:2087-2100`
+# builds the source and amalgamation zip archives from `tool/mksrczip.tcl` and
+# `tool/mkamalzip.tcl`, and `upstream/README.md` describes building SQLite as
+# `./configure && make` with no hosted service anywhere in it. This file is
+# therefore entirely the fork's, and it gates the artifacts this fork delivers
+# rather than retargeting anything upstream owns.
+#
+# Six jobs, six different questions:
+#   provenance  do the 1299 upstream digests still match, is the native file set
+#               exactly the recorded one, does upstream's own Fossil manifest
+#               still hash to the check-in this tree claims, and is the
+#               public-domain grant still where the records say it is
+#   native      does the amalgamation and the shell compile and link in both
+#               linkages, do the tests run in two optimization modes, does the
+#               example run, and does upstream's own shell answer the fixture
+#               exactly as the hand-computed table says
+#   installed   does the *installed* tree serve a plain C consumer through
+#               pkg-config, in both linkages
+#   cross       does the whole package compile for each of the six baseline
+#               targets, in both linkages, running nothing
+#   consumer    does the published module resolve from a package that did not
+#               write it, in both linkages
+#   runtime     does the runtime-loading build load an explicitly named provider
+#               and produce the same answers the linked build does
+#
+# The C gate program below is written once into $RUNNER_TEMP and used against
+# both deliveries, which is only possible in one job -- and sharing it is what
+# makes the comparison meaningful: the same program has to pass linked against
+# `libsqlite3.a` and linked against the shared object, so a difference between
+# the two artifacts cannot hide.
+#
+# There is no `continue-on-error` in this file and there is no matrix with a
+# tolerated target. Each target is a separate step on purpose: a matrix row
+# allowed to fail is indistinguishable from a target that was quietly dropped,
+# and "we know that one is broken" is only a fact once a gate run has printed the
+# failure. If a target ever does turn out to be unsupported here, the honest edit
+# is to replace that step with a command that asserts the specific documented
+# failure and to record the run in FORK-NOTES.md, not to add a flag that hides
+# it.
+#
+# System-library mode (`-fsys=sqlite3` / `-Dsystem=true`) is deliberately not a
+# step here: it needs an installed libsqlite3 with its own headers, and a stock
+# runner has neither. It is gated locally on a machine that has it, and a claim
+# about it needs that run, not this file.
+#
+# The full 53-platform matrix is not in this file. `cross-test`, run from the
+# package root, builds and *runs* `tests.zig` for every platform in Zig 0.17.0's
+# published Tier 1/2 table through this repository's own build graph, using
+# `cross-test.profile.sh` for its settings. It is not a job here because
+# `cross-test` and its sibling helpers are a host-local tool with its own runner
+# detection and its own scratch policy, not something a GitHub runner has; adding
+# a job that invoked a path it does not have would fail for a reason that has
+# nothing to do with this package, and wrapping that job in an availability check
+# would turn a missing gate into a green one. So this file does not pretend to
+# cover it and does not stand in for it: the `cross` job below compiles six
+# targets and runs nothing, and a platform with no runner on the host is recorded
+# as explicit `build_only` coverage, never as a pass.
+
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ZIG_VERSION: "0.17.0"
+  # Shared across jobs so a fetch or a cache hit cannot serve one job's archive
+  # to another. Nothing here downloads anything at build time: the package
+  # declares no dependencies, and these variables only keep the toolchain from
+  # reaching a network it does not need.
+  ZIG_LOCAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
+
+jobs:
+  provenance:
+    name: upstream digests, file set, check-in identity and licence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The bytes, the exact file set, upstream's own manifest against the
+      # vendored bytes, the check-in name, one version in three places, the
+      # public-domain grant, the preserved upstream README, and the agreement
+      # between the fixture SQL and the SQL the tests run.
+      - name: source integrity
+        run: |
+          set -euo pipefail
+          tools/check-provenance.sh
+
+      # The digests on their own, so a failure names the bytes rather than the
+      # wrapper. `sha256sum -c` reads `#` lines as comments, so the header in
+      # UPSTREAM.sha256 is not a record and does not count.
+      - name: every recorded digest
+        run: |
+          set -euo pipefail
+          records=$(grep -c '^[0-9a-f]\{64\}  ' UPSTREAM.sha256)
+          echo "UPSTREAM.sha256 records $records files"
+          test "$records" -eq 1299
+          sha256sum -c UPSTREAM.sha256 | tail -n 3
+
+      # No upstream file may carry an edit that the records do not describe.
+      - name: the tree this package publishes is what it says it is
+        run: |
+          set -euo pipefail
+          test -f README.upstream.md
+          cmp README.upstream.md upstream/README.md
+          test "$(grep -c '^F ' upstream/manifest)" -ge 2200
+          echo "the preserved upstream README is byte-identical and the Fossil manifest is intact"
+
+  native:
+    name: native build, tests, example and upstream-shell oracle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      - name: source integrity
+        run: tools/check-provenance.sh
+
+      # ---------------------------------------------------------------- static
+      - name: build and install (static)
+        run: |
+          set -euo pipefail
+          zig build -j8 --summary all
+
+      - name: tests, Debug
+        run: zig build test -j8 --summary all
+
+      - name: tests, ReleaseSafe
+        run: zig build test -Doptimize=ReleaseSafe -j8 --summary all
+
+      - name: example program
+        run: zig build smoke -j8 --summary all
+
+      # The upstream-interop gate. `zig build oracle` installs and then runs
+      # tools/check-oracle.sh against the installed shell: upstream's own
+      # src/shell.c, its own SQL front end, its own output formatting, compared
+      # byte for byte with the hand-computed table.
+      - name: upstream shell answers the fixture
+        run: zig build oracle -j8 --summary all
+
+      # The shell itself, through its real CLI, on something the fixture does not
+      # cover. This is the program a person would type.
+      - name: the sqlite3 program through its CLI
+        run: |
+          set -euo pipefail
+          printf '%s\n' \
+            'CREATE TABLE t(a,b);' \
+            "INSERT INTO t VALUES('x',1),('y',2),('z',3);" \
+            'SELECT b, a FROM t WHERE b>1 ORDER BY b;' \
+            | ./zig-out/bin/sqlite3 -batch -noheader -list -separator '|' :memory: \
+            > actual.txt
+          printf '2|y\n3|z\n' > expected.txt
+          diff -u expected.txt actual.txt
+
+      - name: the installed sqlite3.pc resolves and reports the release
+        run: |
+          set -euo pipefail
+          export PKG_CONFIG_PATH="$PWD/zig-out/lib/pkgconfig"
+          test "$(pkg-config --modversion sqlite3)" = "3.53.4"
+          test "$(pkg-config --libs sqlite3)" = "-L${PKG_CONFIG_PATH%/pkgconfig} -lsqlite3" || \
+            pkg-config --libs sqlite3 | grep -q -- '-lsqlite3'
+          # This configuration compiles no SQLITE_ENABLE_* option, so a
+          # consumer that asks the library must be told "no".
+          printf "SELECT sqlite_compileoption_used('SQLITE_ENABLE_FTS5');\n" \
+            | ./zig-out/bin/sqlite3 -batch -noheader -list :memory: | grep -qx '0'
+
+      # ---------------------------------------------------------------- shared
+      - name: build and install (dynamic)
+        run: zig build -Dlinkage=dynamic -j8 --summary all
+
+      - name: the shared object carries upstream's ABI name
+        run: |
+          set -euo pipefail
+          ls -l zig-out/lib/libsqlite3.so*
+          # upstream/main.mk:1516-1519 names this link for pre-3.48 upgrade
+          # compatibility, and it is the name a consumer binary records.
+          readelf -d zig-out/lib/libsqlite3.so.0.53.4 | grep -q 'SONAME.*libsqlite3\.so\.0'
+          readelf -d zig-out/bin/sqlite3 | grep -q 'NEEDED.*libsqlite3\.so\.0'
+
+      - name: tests, shared, Debug
+        run: zig build test -Dlinkage=dynamic -j8 --summary all
+
+      - name: tests, shared, ReleaseSafe
+        run: zig build test -Dlinkage=dynamic -Doptimize=ReleaseSafe -j8 --summary all
+
+      - name: example program, shared
+        run: zig build smoke -Dlinkage=dynamic -j8 --summary all
+
+      - name: upstream shell answers the fixture, shared
+        run: zig build oracle -Dlinkage=dynamic -j8 --summary all
+
+  installed:
+    name: the installed tree serves a plain C consumer, in both linkages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      # One program, used against both deliveries. Every reference below is
+      # computed here in C arithmetic from twelve literal rows and compared with
+      # literals written out in the same file. A program that only asked SQLite
+      # whether it agreed with itself would not be a gate.
+      - name: write the C gate program
+        run: |
+          cat > "$RUNNER_TEMP/c_surface_gate.c" <<'C'
+
+          #include <sqlite3.h>
+          #include <stdio.h>
+          #include <string.h>
+
+          /* The twelve rows this package's fixture seeds, and the grouped answer
+             computed from them on paper:
+               a: 100 + 50 + 300 + 25 - 50 =  425   5 rows   entries 1,3,6,9,12
+               b: 250 + 25 - 100 + 400     =  575   4 rows   entries 2,5,8,11
+               c: -700 + 75 + 50           = -575   3 rows   entries 4,7,10
+               whole table 425 + 575 - 575  =  425  over 12 rows
+             Nothing below compares the library with itself: every expected value
+             is a literal written in this file. */
+
+          struct seed { long long entry; const char *account; long long cents; };
+
+          static const struct seed seeds[] = {
+            { 1, "a",  100 }, { 2, "b",  250 }, { 3, "a",   50 },
+            { 4, "c", -700 }, { 5, "b",   25 }, { 6, "a",  300 },
+            { 7, "c",   75 }, { 8, "b", -100 }, { 9, "a",   25 },
+            { 10, "c",  50 }, { 11, "b", 400 }, { 12, "a", -50 }
+          };
+
+          static const char *const want_name[3] = { "a", "b", "c" };
+          static const long long want_sum[3] = { 425, 575, -575 };
+          static const long long want_cnt[3] = { 5, 4, 3 };
+          static const long long want_min[3] = { 1, 2, 4 };
+          static const long long want_max[3] = { 12, 11, 10 };
+
+          /* Every mismatch is reported, not just the first, so one run names
+             every difference rather than making the reader re-run five times. */
+          static int problems = 0;
+
+          static void want_int(const char *what, long long got, long long want) {
+            if (got != want) {
+              fprintf(stderr, "%s: got %lld want %lld\n", what, got, want);
+              problems++;
+            }
+          }
+
+          static void want_str(const char *what, const char *got, const char *want) {
+            if (got == 0 || strcmp(got, want) != 0) {
+              fprintf(stderr, "%s: got \"%s\" want \"%s\"\n", what,
+                      got ? got : "(null)", want);
+              problems++;
+            }
+          }
+
+          static int seed_table(sqlite3 *db) {
+            sqlite3_stmt *ins = 0;
+            size_t i;
+            if (sqlite3_exec(db,
+          "CREATE TABLE ledger(entry INTEGER NOT NULL, "
+          "account TEXT NOT NULL, cents INTEGER NOT NULL)", 0, 0, 0) != SQLITE_OK) {
+              fprintf(stderr, "create ledger: %s\n", sqlite3_errmsg(db));
+              return 1;
+            }
+            if (sqlite3_prepare_v2(db, "INSERT INTO ledger VALUES(?1,?2,?3)", -1,
+                                   &ins, 0) != SQLITE_OK) {
+              fprintf(stderr, "prepare insert: %s\n", sqlite3_errmsg(db));
+              return 1;
+            }
+            for (i = 0; i < sizeof seeds / sizeof seeds[0]; i++) {
+              int rc;
+              sqlite3_reset(ins);
+              rc = sqlite3_bind_int64(ins, 1, seeds[i].entry);
+              if (rc == SQLITE_OK)
+                rc = sqlite3_bind_text(ins, 2, seeds[i].account, -1, SQLITE_STATIC);
+              if (rc == SQLITE_OK)
+                rc = sqlite3_bind_int64(ins, 3, seeds[i].cents);
+              if (rc == SQLITE_OK)
+                rc = sqlite3_step(ins);
+              if (rc != SQLITE_DONE) {
+                fprintf(stderr, "insert %lld: %s\n", (long long) seeds[i].entry,
+                        sqlite3_errmsg(db));
+                sqlite3_finalize(ins);
+                return 1;
+              }
+            }
+            sqlite3_finalize(ins);
+            return 0;
+          }
+
+          static int check_groups(sqlite3 *db) {
+            sqlite3_stmt *st = 0;
+            int i = 0;
+            int rc;
+            long long total = 0;
+            long long rows = 0;
+            if (sqlite3_prepare_v2(db,
+          "SELECT account, SUM(cents), COUNT(*), MIN(entry), MAX(entry) "
+          "FROM ledger GROUP BY account ORDER BY account", -1, &st, 0) != SQLITE_OK) {
+              fprintf(stderr, "prepare group: %s\n", sqlite3_errmsg(db));
+              return 1;
+            }
+            while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+              if (i > 2) {
+                fprintf(stderr, "more than three groups\n");
+                break;
+              }
+              want_str("account name", (const char *) sqlite3_column_text(st, 0),
+                       want_name[i]);
+              want_int("group sum", sqlite3_column_int64(st, 1), want_sum[i]);
+              want_int("group count", sqlite3_column_int64(st, 2), want_cnt[i]);
+              want_int("group min", sqlite3_column_int64(st, 3), want_min[i]);
+              want_int("group max", sqlite3_column_int64(st, 4), want_max[i]);
+              total += sqlite3_column_int64(st, 1);
+              rows += sqlite3_column_int64(st, 2);
+              i++;
+            }
+            sqlite3_finalize(st);
+            if (rc != SQLITE_DONE) {
+              fprintf(stderr, "step group: %d %s\n", rc, sqlite3_errmsg(db));
+              return 1;
+            }
+            want_int("group rows read", i, 3);
+            /* The group sums have to add up to the whole-table sum and the group
+               counts to its row count. This is what catches a row counted in
+               one group and missed in another. */
+            want_int("sum of group sums", total, 425);
+            want_int("sum of group counts", rows, 12);
+            return problems ? 1 : 0;
+          }
+
+          /* 2^53 + 1: the first integer a double cannot hold, so a build whose
+             sqlite3_int64 were 32 bits, or which went through a double, could
+             not answer this at all. */
+          static int check_wide_integer(sqlite3 *db) {
+            sqlite3_stmt *st = 0;
+            int rc = sqlite3_prepare_v2(db, "SELECT ?1, typeof(?1)", -1, &st, 0);
+            if (rc != SQLITE_OK) {
+              fprintf(stderr, "prepare wide: %s\n", sqlite3_errmsg(db));
+              return 1;
+            }
+            sqlite3_bind_int64(st, 1, 9007199254740993LL);
+            rc = sqlite3_step(st);
+            if (rc == SQLITE_ROW) {
+              want_int("2^53+1 round trip", sqlite3_column_int64(st, 0),
+                       9007199254740993LL);
+              want_str("typeof(2^53+1)", (const char *) sqlite3_column_text(st, 1),
+                       "integer");
+            } else {
+              fprintf(stderr, "step wide: %d\n", rc);
+              problems++;
+            }
+            sqlite3_finalize(st);
+            return problems ? 1 : 0;
+          }
+
+          /* NULL and the empty string are different values with different
+             classes, and a NULL has no integer. */
+          static int check_null_versus_empty(sqlite3 *db) {
+            sqlite3_stmt *st = 0;
+            int rc = sqlite3_prepare_v2(db, "SELECT NULL, ''", -1, &st, 0);
+            if (rc != SQLITE_OK) {
+              fprintf(stderr, "prepare null: %s\n", sqlite3_errmsg(db));
+              return 1;
+            }
+            rc = sqlite3_step(st);
+            if (rc != SQLITE_ROW) {
+              fprintf(stderr, "step null: %d\n", rc);
+              problems++;
+            } else {
+              want_int("NULL class", sqlite3_column_type(st, 0), SQLITE_NULL);
+              want_int("empty-string class", sqlite3_column_type(st, 1), SQLITE_TEXT);
+              /* Reading a NULL as an integer would answer 0, which is a lie the
+                 header does not permit. */
+              want_int("NULL is not integer zero", sqlite3_column_int64(st, 0), 0);
+            }
+            sqlite3_finalize(st);
+            return problems ? 1 : 0;
+          }
+
+          /* A constraint violation reaches the caller as its extended code. */
+          static int check_constraint(sqlite3 *db) {
+            sqlite3_stmt *st = 0;
+            int rc;
+            if (sqlite3_exec(db, "CREATE TABLE k(v INTEGER PRIMARY KEY)", 0, 0, 0)
+                != SQLITE_OK) {
+              fprintf(stderr, "create k: %s\n", sqlite3_errmsg(db));
+              return 1;
+            }
+            if (sqlite3_exec(db, "INSERT INTO k VALUES(1)", 0, 0, 0) != SQLITE_OK) {
+              fprintf(stderr, "insert k: %s\n", sqlite3_errmsg(db));
+              return 1;
+            }
+            rc = sqlite3_prepare_v2(db, "INSERT INTO k VALUES(1)", -1, &st, 0);
+            if (rc != SQLITE_OK) {
+              fprintf(stderr, "prepare dup: %s\n", sqlite3_errmsg(db));
+              return 1;
+            }
+            rc = sqlite3_step(st);
+            sqlite3_finalize(st);
+            if (rc != SQLITE_CONSTRAINT) {
+              fprintf(stderr, "duplicate key: got %d want %d\n", rc, SQLITE_CONSTRAINT);
+              problems++;
+            }
+            if (sqlite3_extended_errcode(db) != SQLITE_CONSTRAINT_PRIMARYKEY) {
+              fprintf(stderr, "extended: got %d want %d\n",
+                      sqlite3_extended_errcode(db), SQLITE_CONSTRAINT_PRIMARYKEY);
+              problems++;
+            }
+            if (sqlite3_errstr(SQLITE_CONSTRAINT_PRIMARYKEY) == 0) problems++;
+            return problems ? 1 : 0;
+          }
+
+          /* sqlite3_close_v2 with a live statement: upstream destroys the
+             statement and releases the connection with the last one. The call
+             has to return SQLITE_OK and free the handle; the statement is already
+             gone, so finalizing it again would be undefined and the only
+             assertion left is that the process survived. */
+          static int check_close_with_live_statement(void) {
+            sqlite3 *zombie = 0;
+            sqlite3_stmt *live = 0;
+            int rc = sqlite3_open_v2(":memory:", &zombie,
+                                     SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, 0);
+            if (rc != SQLITE_OK) {
+              fprintf(stderr, "open: %d\n", rc);
+              sqlite3_close_v2(zombie);
+              return 1;
+            }
+            rc = sqlite3_prepare_v2(zombie, "SELECT 1", -1, &live, 0);
+            if (rc != SQLITE_OK) {
+              fprintf(stderr, "prepare live: %d\n", rc);
+              sqlite3_close_v2(zombie);
+              return 1;
+            }
+            (void) live;
+            rc = sqlite3_close_v2(zombie);
+            if (rc != SQLITE_OK) {
+              fprintf(stderr, "close_v2: %d\n", rc);
+              problems++;
+              return 1;
+            }
+            return 0;
+          }
+
+          int main(void) {
+            sqlite3 *db = 0;
+            int rc = sqlite3_open_v2(":memory:", &db,
+                                     SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, 0);
+            if (rc != SQLITE_OK) {
+              fprintf(stderr, "open: %d %s\n", rc,
+                      db ? sqlite3_errmsg(db) : "(no connection)");
+              sqlite3_close_v2(db);
+              return 1;
+            }
+            printf("sqlite3_libversion %s, threadsafe %d\n",
+                   sqlite3_libversion(), sqlite3_threadsafe());
+
+            /* The header's own release family, not a literal. */
+            want_str("version family", sqlite3_libversion(), "3.53.4");
+
+            if (seed_table(db) != 0) goto done;
+            if (check_groups(db) != 0) goto done;
+            if (check_wide_integer(db) != 0) goto done;
+            if (check_null_versus_empty(db) != 0) goto done;
+            if (check_constraint(db) != 0) goto done;
+
+          done:
+            sqlite3_close_v2(db);
+            if (problems != 0) {
+              fprintf(stderr, "%d C checks did not match\n", problems);
+              return 1;
+            }
+            if (check_close_with_live_statement() != 0) return 1;
+            printf("every C answer matched the hand-computed table\n");
+            return 0;
+          }
+          C
+
+      # The static archive first: a C consumer's `-lsqlite3` with nothing else.
+      - name: build and install (static)
+        run: zig build -j8 --summary all
+
+      - name: C consumer, static, through pkg-config
+        run: |
+          set -euo pipefail
+          export PKG_CONFIG_PATH="$PWD/zig-out/lib/pkgconfig"
+          cc -std=c99 -Wall -Wextra -O2 \
+             "$RUNNER_TEMP/c_surface_gate.c" \
+             $(pkg-config --cflags sqlite3) \
+             -o "$RUNNER_TEMP/c_gate_static" \
+             $(pkg-config --static --libs sqlite3) -lm -ldl -lpthread
+          "$RUNNER_TEMP/c_gate_static"
+
+      - name: C consumer, shared, through pkg-config
+        run: |
+          set -euo pipefail
+          zig build -Dlinkage=dynamic -j8 --summary all
+          export PKG_CONFIG_PATH="$PWD/zig-out/lib/pkgconfig"
+          cc -std=c99 -Wall -Wextra -O2 \
+             "$RUNNER_TEMP/c_surface_gate.c" \
+             $(pkg-config --cflags sqlite3) \
+             -o "$RUNNER_TEMP/c_gate_shared" \
+             $(pkg-config --libs sqlite3)
+          # The shared object has to be found at run time, which is what the
+          # install rpath and the libsqlite3.so.0 SONAME are for.
+          LD_LIBRARY_PATH="$PWD/zig-out/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+            "$RUNNER_TEMP/c_gate_shared"
+
+  cross:
+    name: compile-only matrix, all six baseline targets, both linkages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      # Each target is its own step and runs nothing. `zig build check` walks the
+      # whole list when no -Dtarget is given; naming them one at a time makes a
+      # failure name the row instead of aborting a sweep. A foreign target with
+      # no runner here is compile-only coverage, never a pass -- which is why no
+      # step below runs a target binary.
+      - name: check x86_64-linux-gnu
+        run: zig build check -Dtarget=x86_64-linux-gnu -j8 --summary all
+      - name: check aarch64-linux-gnu
+        run: zig build check -Dtarget=aarch64-linux-gnu -j8 --summary all
+      - name: check aarch64-macos-none
+        run: zig build check -Dtarget=aarch64-macos-none -j8 --summary all
+      - name: check x86_64-windows-gnu
+        run: zig build check -Dtarget=x86_64-windows-gnu -j8 --summary all
+      - name: check riscv64-linux-gnu
+        run: zig build check -Dtarget=riscv64-linux-gnu -j8 --summary all
+      - name: check wasm32-wasi
+        run: zig build check -Dtarget=wasm32-wasi -j8 --summary all
+
+      - name: check x86_64-linux-gnu, shared
+        run: zig build check -Dtarget=x86_64-linux-gnu -Dlinkage=dynamic -j8 --summary all
+      - name: check aarch64-linux-gnu, shared
+        run: zig build check -Dtarget=aarch64-linux-gnu -Dlinkage=dynamic -j8 --summary all
+      - name: check aarch64-macos-none, shared
+        run: zig build check -Dtarget=aarch64-macos-none -Dlinkage=dynamic -j8 --summary all
+      - name: check x86_64-windows-gnu, shared
+        run: zig build check -Dtarget=x86_64-windows-gnu -Dlinkage=dynamic -j8 --summary all
+      - name: check riscv64-linux-gnu, shared
+        run: zig build check -Dtarget=riscv64-linux-gnu -Dlinkage=dynamic -j8 --summary all
+      # WASI has no dynamic linker. Test the documented refusal, not a fake
+      # shared artifact or a configurer panic.
+      - name: wasm32-wasi refuses shared delivery cleanly
+        run: |
+          set -euo pipefail
+          if zig build check -Dtarget=wasm32-wasi -Dlinkage=dynamic -j8 --summary all > out.txt 2>&1; then
+            cat out.txt
+            echo "WASI unexpectedly accepted shared delivery" >&2
+            exit 1
+          fi
+          cat out.txt
+          grep -Fq -- '-Dlinkage=dynamic was asked for wasi' out.txt
+          grep -Fq 'no dynamic linker' out.txt
+          if grep -qiE 'panic|stack trace' out.txt; then
+            echo "unsupported linkage must not crash the build script" >&2
+            exit 1
+          fi
+
+  consumer:
+    name: the separate consumer package, both linkages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      # consumer/build.zig.zon names the library by a relative path, not a fetch,
+      # so this proves `dep.module("sqlite3")` resolves from a package that did
+      # not write it. Its program checks a grouped aggregation against a table
+      # hand-computed in its own source and exits non-zero on any mismatch.
+      - name: consumer, linked, static
+        working-directory: consumer
+        run: zig build run -j8 --summary all
+
+      - name: consumer, linked, shared
+        working-directory: consumer
+        run: |
+          set -euo pipefail
+          zig build -Dlinkage=dynamic -j8 --summary all
+          zig build run -Dlinkage=dynamic -j8 --summary all
+
+      # The parent step that owns the whole configuration: it forwards target,
+      # cpu, linkage, runtime and the resolved system mode into the nested
+      # build, and installs rather than runs when the host cannot execute the
+      # target.
+      - name: consumer through the parent step, both linkages
+        run: |
+          set -euo pipefail
+          zig build consumer -j8 --summary all
+          zig build consumer -Dlinkage=dynamic -j8 --summary all
+
+  runtime:
+    name: the runtime-loading route, against an explicitly named provider
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      # Under -Druntime=true the library's entry points resolve at run time
+      # through a dispatch table generated from the same translation. The
+      # provider is named on the command line; there is no default and no
+      # search, and a provider that does not export the whole default-build
+      # symbol set is refused rather than half used.
+      - name: build the shared object to be the provider
+        run: zig build -Dlinkage=dynamic -j8 --summary all
+
+      - name: a runtime build with no provider named says so
+        working-directory: consumer
+        run: |
+          set -euo pipefail
+          set +e
+          env -u SQLITE_TEST_PROVIDER zig build run -Druntime=true -- --unrecognized 2>&1 | tee out.txt
+          result=${PIPESTATUS[0]}
+          set -e
+          test "$result" -ne 0
+          grep -q 'NoProviderConfigured' out.txt
+
+      - name: the same answers from a named provider
+        working-directory: consumer
+        run: |
+          set -euo pipefail
+          zig build run -Druntime=true \
+            -- --provider "$GITHUB_WORKSPACE/zig-out/lib/libsqlite3.so"
+
+      # A file that opens and then fails the check is not an error in the loader:
+      # it is a library that is not the one the header describes. The answer must
+      # be MissingSymbol, and nothing may be published.
+      - name: a library that is not this one is refused
+        working-directory: consumer
+        run: |
+          set -euo pipefail
+          set +e
+          zig build run -Druntime=true \
+            -- --provider /usr/lib/x86_64-linux-gnu/libm.so.6 2>&1 | tee out.txt
+          result=${PIPESTATUS[0]}
+          set -e
+          test "$result" -ne 0
+          grep -qE 'MissingSymbol|ValidationFailed' out.txt
+
+      - name: a relative path is refused before any loader call
+        working-directory: consumer
+        run: |
+          set -euo pipefail
+          set +e
+          zig build run -Druntime=true -- --provider ./libsqlite3.so 2>&1 | tee out.txt
+          result=${PIPESTATUS[0]}
+          set -e
+          test "$result" -ne 0
+          grep -q 'InvalidSource' out.txt

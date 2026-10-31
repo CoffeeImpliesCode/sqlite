@@ -34,14 +34,22 @@ The native files under `src/` are upstream's amalgamation, headers, and shell; t
 - ELF shared delivery uses soname `libsqlite3.so.0`; Zig's single version field produces `libsqlite3.so.0.53.4` instead of upstream's `libsqlite3.so.3.53.4` filename while preserving the ABI name.
 - The build generates relocatable `sqlite3.pc` metadata and installs the library, shell, public headers, and license records. Nix package variants call the same build graph.
 - Target-specific links name `-lm`, `-ldl`, and `-lpthread` only where required. The default configuration does not reference zlib or ICU.
+- Debug and safe builds of the delivered C library use trapping undefined-behavior checks. The installed archive therefore retains checks without requiring Zig's UBSan runtime when linked by a plain C compiler.
 - The upstream TCL suite is retained but not built. Its `testfixture` needs canonical test C sources absent from this package, plus TCL 8.6, autosetup, and make. The package's Zig tests and SQL oracle are separate checks, not replacements for that suite.
 
 ## Platform boundaries
 
-- WASI is static-only: upstream selects `SQLITE_THREADSAFE=0` and omits loadable extensions. Runtime loading is unavailable there. The check matrix filters targets by the selected delivery and dispatch requirements; see the support matrix in `README.md`.
+- WASI is static-only: upstream selects `SQLITE_THREADSAFE=0` and omits loadable extensions. Runtime loading is unavailable there. The check matrix filters targets by the selected delivery and dispatch requirements; see the support matrix in `README.md`. An explicit `-Dlinkage=dynamic -Dtarget=wasm32-wasi` is refused with a diagnostic and nonzero exit, not a build-script panic. Forgejo verifies the static build and this refusal separately.
 - Runtime loading is also unavailable on Emscripten and freestanding targets. Facade text/blob binds use the C adapter on runtime-loaded builds; linked-only bind declarations are excluded from those builds to avoid native-symbol relocations in debug information. Raw translated sentinel limits are in `README.zig.md`.
 - Windows uses the Windows loader and C runtime, so the build names no separate Unix link libraries. macOS needs `-lm`; `dlopen` and pthread are in libc.
 - The generic Unix link rule requests `-ldl` on NetBSD and OpenBSD; availability of that library and need for separate `-lm` or `-lpthread` are not established.
 - Runtime dispatch permits absent feature- and target-dependent exports listed in `runtime/graph.zig`; missing required symbols still reject the provider. Carray bindings are declared without a feature guard in `src/sqlite3.h`, but their implementations require `SQLITE_ENABLE_CARRAY` and virtual-table support (`src/sqlite3.c:233248`). See `README.zig.md` for availability queries and call behavior.
 - Zig 0.17 exposes no configure-time runner flags or install-prefix string, so cross-target consumer builds install under the parent prefix.
 - Zig 0.17 consumer builds use `--cache-dir <path>` and inherit the maker's current environment, including `SQLITE_TEST_PROVIDER`, `ZIG_GLOBAL_CACHE_DIR`, and `ZIG_LIB_DIR`. Cached configurations do not capture an earlier provider selection.
+
+## Verification workflow
+
+- `.forgejo/workflows/verify.yml` restores the six package gates removed from GitHub Actions, with Zig 0.17.0 matching the manifest.
+- The shell compile-option check calls the SQL function `sqlite_compileoption_used`; `sqlite3_compileoption_used` is the C API name, not a SQL function.
+- Runtime-provider rejection checks run the separate `consumer` package, which owns the `run` step, and require both a nonzero exit and the expected error.
+

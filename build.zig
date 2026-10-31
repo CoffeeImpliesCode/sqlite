@@ -293,6 +293,9 @@ fn add_c_library(
             .link_libc = true,
             // Shared objects require position-independent code.
             .pic = if (linkage == .dynamic) true else null,
+            // Keep Debug/safe UB checks without requiring Zig's UBSan runtime
+            // when a plain C compiler links the installed archive.
+            .sanitize_c = if (optimize == .debug or optimize == .safe) .trap else .off,
         }),
     });
     const c_mod = c_lib.root_module;
@@ -832,7 +835,7 @@ fn deliveredLinkage(
     if (targetHasDynamicLinker(target)) return .dynamic;
 
     const os_tag = target.result.os.tag;
-    const message = std.heap.page_allocator.print(
+    std.process.fatal(
         \\zig build: -Dlinkage=dynamic was asked for {s}, whose operating system has
         \\no dynamic linker, so no shared object can be built or loaded there.
         \\std.Target.DynamicLinker.kind reports `{s}` for it, which is what this
@@ -842,7 +845,5 @@ fn deliveredLinkage(
         \\is a result the caller did not ask for. Use -Dlinkage=static for this
         \\target; the compiled C is identical either way.
         \\
-    , .{ @tagName(os_tag), @tagName(std.Target.DynamicLinker.kind(os_tag)) }) catch
-        "zig build: -Dlinkage=dynamic was asked for a target with no dynamic linker.";
-    @panic(message);
+    , .{ @tagName(os_tag), @tagName(std.Target.DynamicLinker.kind(os_tag)) });
 }
